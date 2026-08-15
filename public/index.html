@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SREAI — Live Infrastructure Console</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div id="app">
+      <!-- Header -->
+      <header class="topbar">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true"></span>
+          <span class="brand-name">SRE<b>AI</b></span>
+          <span class="brand-sub">live infrastructure console</span>
+        </div>
+        <div class="topbar-status">
+          <div class="chip" id="aiChip" title="AI analysis backend"><span class="chip-key">AI</span><span id="aiProvider">—</span></div>
+          <div class="chip" id="refreshChip"><span class="chip-key">REFRESH</span><span id="refreshRate">—</span></div>
+          <div class="live" id="liveState" data-live="off">
+            <span class="live-dot"></span>
+            <span class="live-label" id="liveLabel">connecting…</span>
+          </div>
+        </div>
+      </header>
+
+      <div class="shell">
+        <!-- Sidebar: server inventory -->
+        <aside class="sidebar">
+          <div class="sidebar-head">
+            <span>Servers</span>
+            <span class="count" id="serverCount">0</span>
+          </div>
+          <ul class="server-list" id="serverList"></ul>
+          <button class="add-btn" id="addServerBtn">
+            <span class="plus">+</span> Add server
+          </button>
+          <p class="sidebar-note">
+            Metrics are read live over SSH (or from this machine). Nothing is simulated.
+          </p>
+        </aside>
+
+        <!-- Main -->
+        <main class="main" id="main">
+          <!-- Overview strip -->
+          <section class="overview">
+            <div class="ident">
+              <div class="ident-name" id="selName">—</div>
+              <div class="ident-host mono" id="selHost">—</div>
+              <div class="ident-meta mono" id="selMeta">—</div>
+            </div>
+            <div class="score" id="scoreWrap">
+              <div class="score-num" id="scoreNum">—</div>
+              <div class="score-cap">health</div>
+            </div>
+            <div class="gauges">
+              <div class="gauge" data-metric="cpu">
+                <svg viewBox="0 0 120 120"><circle class="g-track" cx="60" cy="60" r="52"></circle><circle class="g-fill" cx="60" cy="60" r="52"></circle></svg>
+                <div class="gauge-val"><span id="cpuVal">—</span><i>%</i></div>
+                <div class="gauge-cap">CPU</div>
+              </div>
+              <div class="gauge" data-metric="mem">
+                <svg viewBox="0 0 120 120"><circle class="g-track" cx="60" cy="60" r="52"></circle><circle class="g-fill" cx="60" cy="60" r="52"></circle></svg>
+                <div class="gauge-val"><span id="memVal">—</span><i>%</i></div>
+                <div class="gauge-cap">Memory</div>
+              </div>
+              <div class="gauge" data-metric="disk">
+                <svg viewBox="0 0 120 120"><circle class="g-track" cx="60" cy="60" r="52"></circle><circle class="g-fill" cx="60" cy="60" r="52"></circle></svg>
+                <div class="gauge-val"><span id="diskVal">—</span><i>%</i></div>
+                <div class="gauge-cap">Disk</div>
+              </div>
+            </div>
+          </section>
+
+          <!-- Hero: 3D topology + system facts -->
+          <section class="row hero-row">
+            <div class="panel topo">
+              <div class="panel-head"><span>Topology</span><span class="panel-hint" id="topoHint">drag to orbit</span></div>
+              <div class="topo-canvas" id="topoCanvas"></div>
+              <div class="topo-tip" id="topoTip" hidden></div>
+            </div>
+            <div class="panel facts">
+              <div class="panel-head"><span>System</span></div>
+              <dl class="fact-list" id="factList"></dl>
+              <div class="load" id="loadWrap" hidden>
+                <div class="load-cap">load average</div>
+                <div class="load-vals mono" id="loadVals">—</div>
+              </div>
+            </div>
+          </section>
+
+          <!-- Workloads -->
+          <section class="row work-row">
+            <div class="panel">
+              <div class="panel-head"><span>Top processes</span><span class="panel-hint" id="procHint"></span></div>
+              <div class="proc-list" id="procList"></div>
+            </div>
+            <div class="panel">
+              <div class="panel-head"><span>Containers &amp; pods</span></div>
+              <div class="workloads" id="workloads"></div>
+            </div>
+          </section>
+
+          <!-- Logs + AI -->
+          <section class="row triage-row">
+            <div class="panel term-panel">
+              <div class="panel-head">
+                <span>Live logs</span>
+                <span class="panel-hint">click a line to copy · click <b>Analyze</b> to diagnose</span>
+              </div>
+              <div class="terminal" id="terminal"></div>
+            </div>
+            <div class="panel ai-panel">
+              <div class="panel-head">
+                <span>AI incident analysis</span>
+                <button class="analyze-btn" id="analyzeBtn">Analyze recent logs</button>
+              </div>
+              <div class="ai-body" id="aiBody">
+                <div class="ai-empty">
+                  Select a server and click <b>Analyze recent logs</b>, or click any log line to diagnose it.
+                </div>
+              </div>
+            </div>
+          </section>
+        </main>
+      </div>
+    </div>
+
+    <!-- Add-server modal -->
+    <div class="modal-scrim" id="modalScrim" hidden>
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+        <div class="modal-head">
+          <h2 id="modalTitle">Add a server</h2>
+          <button class="modal-x" id="modalClose" aria-label="Close">×</button>
+        </div>
+        <p class="modal-intro">
+          SREAI connects over SSH and runs read-only diagnostics (<span class="mono">top</span>,
+          <span class="mono">free</span>, <span class="mono">df</span>, <span class="mono">journalctl</span>).
+          Credentials stay on your machine, in <span class="mono">data/servers.json</span>.
+        </p>
+        <form id="addForm" class="modal-form">
+          <label>Name <input name="name" placeholder="prod-web-01" autocomplete="off" /></label>
+          <div class="grid2">
+            <label>Host / IP <input name="host" placeholder="203.0.113.10" required autocomplete="off" /></label>
+            <label>Port <input name="port" value="22" inputmode="numeric" autocomplete="off" /></label>
+          </div>
+          <label>Username <input name="username" placeholder="ubuntu" required autocomplete="off" /></label>
+          <div class="auth-toggle">
+            <button type="button" class="auth-opt active" data-auth="password">Password</button>
+            <button type="button" class="auth-opt" data-auth="key">Private key</button>
+          </div>
+          <label id="pwField">Password <input name="password" type="password" autocomplete="off" /></label>
+          <div id="keyFields" hidden>
+            <label>Private key (paste PEM)
+              <textarea name="privateKey" rows="4" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----" autocomplete="off"></textarea>
+            </label>
+            <label>Key passphrase (optional) <input name="passphrase" type="password" autocomplete="off" /></label>
+          </div>
+          <div class="modal-msg" id="modalMsg" hidden></div>
+          <div class="modal-actions">
+            <button type="button" class="btn ghost" id="testBtn">Test connection</button>
+            <button type="submit" class="btn primary" id="saveBtn">Add &amp; monitor</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="/app.js"></script>
+  </body>
+</html>
