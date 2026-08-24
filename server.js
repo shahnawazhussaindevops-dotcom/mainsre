@@ -9,6 +9,11 @@ import * as store from './lib/store.js';
 import * as local from './lib/localCollector.js';
 import * as ssh from './lib/sshCollector.js';
 import { analyze } from './lib/analyzer.js';
+import * as incidentStore from './lib/incidentStore.js';
+import * as runbookStore from './lib/runbookStore.js';
+import * as automationEngine from './lib/automationEngine.js';
+import * as settingsStore from './lib/settingsStore.js';
+import * as alertEngine from './lib/alertEngine.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -62,8 +67,10 @@ const app = express();
 app.use(express.json({ limit: '256kb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
+// ── Config ────────────────────────────────────────────────────────────
 app.get('/api/config', (_req, res) => res.json({ aiProvider: aiProvider(), refreshMs: REFRESH_MS }));
 
+// ── Server CRUD ───────────────────────────────────────────────────────
 app.get('/api/servers', (_req, res) => res.json(store.list()));
 
 app.post('/api/servers', async (req, res) => {
@@ -99,7 +106,7 @@ app.post('/api/servers/:id/test', async (req, res) => {
   }
 });
 
-// Dry-run: validate credentials WITHOUT saving. Nothing is persisted here.
+// Dry-run: validate credentials WITHOUT saving.
 app.post('/api/test', async (req, res) => {
   const b = req.body || {};
   if (!String(b.host || '').trim() || !String(b.username || '').trim()) {
@@ -124,19 +131,211 @@ app.post('/api/test', async (req, res) => {
   }
 });
 
+// ── AI Analysis ───────────────────────────────────────────────────────
 app.post('/api/analyze', async (req, res) => {
   try {
-    const { serverId, log } = req.body || {};
+    const { serverId, log, errorContext } = req.body || {};
     const t = lastTelemetry.get(serverId);
     const logText = (log && String(log).trim()) || (t?.logs || []).slice(-25).join('\n') || 'No logs available.';
     const context = t
-      ? { name: t.name, host: t.host, cpuPct: t.cpuPct, memPct: t.memPct, diskPct: t.diskPct }
+      ? { name: t.name, host: t.host, platform: t.platform, cpuPct: t.cpuPct, memPct: t.memPct, diskPct: t.diskPct }
       : null;
-    const result = await analyze({ log: logText, server: context });
+    const result = await analyze({ log: logText, server: context, errorContext });
     res.json(result);
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
+});
+
+app.post('/api/execute-fix', async (req, res) => {
+  try {
+    const { serverId, command } = req.body || {};
+    if (!serverId || !command) return res.status(400).json({ error: 'serverId and command required' });
+    
+    // Create an ephemeral runbook and execute it
+    const tmpRunbookId = 'rb-tmp-' + Date.now();
+    await runbookStore.create({
+      id: tmpRunbookId,
+      name: 'AI Auto-Fix',
+      description: 'Ephemeral command executed by AI auto-fix loop',
+      category: 'general',
+      severity: 'warning',
+      builtin: false,
+      platforms: ['linux', 'darwin', 'win32'],
+      tags: ['ai-fix'],
+      steps: [
+        { order: 1, title: 'Execute Auto-Fix', command: command, risk: 'caution' }
+      ]
+    });
+    
+    const execution = await automationEngine.execute(
+      tmpRunbookId,
+      serverId,
+      broadcast,
+      sshRunCommand
+    );
+    
+    res.json(execution);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── Incident CRUD ─────────────────────────────────────────────────────
+app.get('/api/incidents', (req, res) => {
+  const filters = {};
+  if (req.query.status) filters.status = req.query.status;
+  if (req.query.severity) filters.severity = req.query.severity;
+  if (req.query.serverId) filters.serverId = req.query.serverId;
+  res.json(incidentStore.list(filters));
+});
+
+app.get('/api/incidents/stats', (_req, res) => {
+  res.json(incidentStore.stats());
+});
+
+app.get('/api/incidents/:id', (req, res) => {
+  const inc = incidentStore.getById(req.params.id);
+  if (!inc) return res.status(404).json({ error: 'Incident not found.' });
+  res.json(inc);
+});
+
+app.post('/api/incidents', async (req, res) => {
+  try {
+    const incident = await incidentStore.create(req.body || {});
+    broadcast({ type: 'incident', action: 'created', incident });
+    res.json(incident);
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.patch('/api/incidents/:id', async (req, res) => {
+  const inc = await incidentStore.update(req.params.id, req.body || {});
+  if (!inc) return res.status(404).json({ error: 'Incident not found.' });
+  broadcast({ type: 'incident', action: 'updated', incident: inc });
+  res.json(inc);
+});
+
+app.delete('/api/incidents/:id', async (req, res) => {
+  const ok = await incidentStore.remove(req.params.id);
+  if (!ok) return res.status(404).json({ error: 'Incident not found.' });
+  broadcast({ type: 'incident', action: 'deleted', incidentId: req.params.id });
+  res.json({ ok: true });
+});
+
+// ── Runbook CRUD ──────────────────────────────────────────────────────
+app.get('/api/runbooks', (_req, res) => res.json(runbookStore.list()));
+
+app.get('/api/runbooks/:id', (req, res) => {
+  const rb = runbookStore.getById(req.params.id);
+  if (!rb) return res.status(404).json({ error: 'Runbook not found.' });
+  res.json(rb);
+});
+
+app.post('/api/runbooks', async (req, res) => {
+  try {
+    const rb = await runbookStore.create(req.body || {});
+    res.json(rb);
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.put('/api/runbooks/:id', async (req, res) => {
+  const rb = await runbookStore.update(req.params.id, req.body || {});
+  if (!rb) return res.status(404).json({ error: 'Runbook not found or is built-in (read-only).' });
+  res.json(rb);
+});
+
+app.delete('/api/runbooks/:id', async (req, res) => {
+  const ok = await runbookStore.remove(req.params.id);
+  if (!ok) return res.status(400).json({ error: 'Cannot delete built-in runbook.' });
+  res.json({ ok: true });
+});
+
+// ── Automation ────────────────────────────────────────────────────────
+app.post('/api/automation/run', async (req, res) => {
+  try {
+    const { runbookId, serverId } = req.body || {};
+    if (!runbookId || !serverId) {
+      return res.status(400).json({ error: 'runbookId and serverId are required.' });
+    }
+    // Run asynchronously — results come via WebSocket
+    const execution = await automationEngine.execute(
+      runbookId,
+      serverId,
+      broadcast,
+      sshRunCommand
+    );
+    res.json(execution);
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.get('/api/automation/history', (_req, res) => {
+  res.json(automationEngine.getHistory());
+});
+
+app.get('/api/automation/history/:id', (req, res) => {
+  const exec = automationEngine.getExecution(req.params.id);
+  if (!exec) return res.status(404).json({ error: 'Execution not found.' });
+  res.json(exec);
+});
+
+app.get('/api/automation/schedules', (_req, res) => {
+  res.json(automationEngine.listSchedules());
+});
+
+app.post('/api/automation/schedule', (req, res) => {
+  try {
+    const { runbookId, serverId, intervalMs } = req.body || {};
+    if (!runbookId || !serverId || !intervalMs) {
+      return res.status(400).json({ error: 'runbookId, serverId, and intervalMs are required.' });
+    }
+    const schedule = automationEngine.addSchedule(
+      runbookId, serverId, Number(intervalMs), broadcast, sshRunCommand
+    );
+    res.json(schedule);
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.delete('/api/automation/schedule/:id', (req, res) => {
+  const ok = automationEngine.removeSchedule(req.params.id);
+  if (!ok) return res.status(404).json({ error: 'Schedule not found.' });
+  res.json({ ok: true });
+});
+
+// ── Settings ──────────────────────────────────────────────────────────
+app.get('/api/settings', (_req, res) => res.json(settingsStore.get()));
+
+app.patch('/api/settings', async (req, res) => {
+  const settings = await settingsStore.update(req.body || {});
+  res.json(settings);
+});
+
+app.post('/api/settings/groups', async (req, res) => {
+  try {
+    const group = await settingsStore.addGroup(req.body.name);
+    res.json(group);
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.patch('/api/settings/groups/:id', async (req, res) => {
+  const group = await settingsStore.updateGroup(req.params.id, req.body || {});
+  if (!group) return res.status(404).json({ error: 'Group not found.' });
+  res.json(group);
+});
+
+app.delete('/api/settings/groups/:id', async (req, res) => {
+  const ok = await settingsStore.removeGroup(req.params.id);
+  if (!ok) return res.status(404).json({ error: 'Group not found.' });
+  res.json({ ok: true });
 });
 
 // ── HTTP + WebSocket server ───────────────────────────────────────────
@@ -154,6 +353,50 @@ wss.on('connection', (ws) => {
     ws.send(JSON.stringify({ type: 'telemetry', data: { ...t, logs: undefined } }));
   }
 });
+
+// SSH command runner for automation engine
+async function sshRunCommand(server, command) {
+  // Reuse the existing sshCollector's internal runCommand by importing it
+  // We import dynamically to use the same connection logic
+  const ssh2 = await import('ssh2');
+  const { Client } = ssh2.default || ssh2;
+
+  return new Promise((resolve, reject) => {
+    const conn = new Client();
+    let out = '';
+    let err = '';
+    const timer = setTimeout(() => {
+      conn.end();
+      reject(new Error('Command timed out'));
+    }, 30000);
+
+    const cfg = {
+      host: server.host,
+      port: server.port || 22,
+      username: server.username,
+      readyTimeout: 15000,
+    };
+    if (server.privateKey) {
+      cfg.privateKey = server.privateKey;
+      if (server.passphrase) cfg.passphrase = server.passphrase;
+    } else {
+      cfg.password = server.password;
+    }
+
+    conn
+      .on('ready', () => {
+        conn.exec(command, (e, stream) => {
+          if (e) { clearTimeout(timer); conn.end(); return reject(e); }
+          stream
+            .on('close', () => { clearTimeout(timer); conn.end(); resolve({ out, err }); })
+            .on('data', (d) => (out += d.toString()))
+            .stderr.on('data', (d) => (err += d.toString()));
+        });
+      })
+      .on('error', (e) => { clearTimeout(timer); reject(e); })
+      .connect(cfg);
+  });
+}
 
 // ── Polling loop ──────────────────────────────────────────────────────
 const lastTelemetry = new Map();
@@ -203,6 +446,10 @@ async function pollServer(server) {
     if (toSend.length) {
       broadcast({ type: 'log', serverId: server.id, name: server.name, status: enriched.status, lines: toSend });
     }
+
+    // ── Alert detection (auto-create incidents) ──
+    await alertEngine.processAlerts(enriched, broadcast).catch(() => {});
+
   } catch (e) {
     const errT = {
       id: server.id,
@@ -228,6 +475,11 @@ async function pollAll() {
 
 // ── Boot ──────────────────────────────────────────────────────────────
 await store.load();
+await settingsStore.load();
+await incidentStore.load();
+await runbookStore.load();
+await automationEngine.load();
+
 server.listen(PORT, () => {
   console.log(`\n  SREAI running →  http://localhost:${PORT}`);
   console.log(`  AI analysis   →  ${aiProvider()}`);

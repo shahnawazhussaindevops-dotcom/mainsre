@@ -3,14 +3,15 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>SREAI — Live Infrastructure Console</title>
+    <title>SREAI — Live SRE Platform</title>
+    <meta name="description" content="SREAI is a full-stack SRE platform with live infrastructure monitoring, incident triage, automation engine, and AI-powered analysis." />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
       href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/styles.css?v=3" />
   </head>
   <body>
     <div id="app">
@@ -19,7 +20,7 @@
         <div class="brand">
           <span class="brand-mark" aria-hidden="true"></span>
           <span class="brand-name">SRE<b>AI</b></span>
-          <span class="brand-sub">live infrastructure console</span>
+          <span class="brand-sub">SRE platform</span>
         </div>
         <div class="topbar-status">
           <div class="chip" id="aiChip" title="AI analysis backend"><span class="chip-key">AI</span><span id="aiProvider">—</span></div>
@@ -32,24 +33,51 @@
       </header>
 
       <div class="shell">
-        <!-- Sidebar: server inventory -->
+        <!-- Navigation sidebar -->
         <aside class="sidebar">
-          <div class="sidebar-head">
-            <span>Servers</span>
-            <span class="count" id="serverCount">0</span>
+          <nav class="nav-section">
+            <a class="nav-link active" data-route="/dashboard" href="#/dashboard" id="navDashboard">
+              <svg viewBox="0 0 20 20" fill="currentColor"><path d="M3 4a1 1 0 011-1h12a1 1 0 011 1v2a1 1 0 01-1 1H4a1 1 0 01-1-1V4zm0 6a1 1 0 011-1h6a1 1 0 011 1v6a1 1 0 01-1 1H4a1 1 0 01-1-1v-6zm10 0a1 1 0 011-1h2a1 1 0 011 1v6a1 1 0 01-1 1h-2a1 1 0 01-1-1v-6z"/></svg>
+              Dashboard
+            </a>
+            <a class="nav-link" data-route="/godmode" href="#/godmode" id="navGodmode">
+              <svg viewBox="0 0 20 20" fill="currentColor"><path d="M10 12a2 2 0 100-4 2 2 0 000 4z"/><path fill-rule="evenodd" d="M.458 10C1.732 5.943 5.522 3 10 3s8.268 2.943 9.542 7c-1.274 4.057-5.064 7-9.542 7S1.732 14.057.458 10zM14 10a4 4 0 11-8 0 4 4 0 018 0z" clip-rule="evenodd"/></svg>
+              GodMode
+            </a>
+            <a class="nav-link" data-route="/incidents" href="#/incidents" id="navIncidents">
+              <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd"/></svg>
+              Incidents
+              <span class="nav-badge" id="incidentBadge" hidden>0</span>
+            </a>
+            <a class="nav-link" data-route="/automation" href="#/automation" id="navAutomation">
+              <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M11.49 3.17c-.38-1.56-2.6-1.56-2.98 0a1.532 1.532 0 01-2.286.948c-1.372-.836-2.942.734-2.106 2.106.54.886.061 2.042-.947 2.287-1.561.379-1.561 2.6 0 2.978a1.532 1.532 0 01.947 2.287c-.836 1.372.734 2.942 2.106 2.106a1.532 1.532 0 012.287.947c.379 1.561 2.6 1.561 2.978 0a1.533 1.533 0 012.287-.947c1.372.836 2.942-.734 2.106-2.106a1.533 1.533 0 01.947-2.287c1.561-.379 1.561-2.6 0-2.978a1.532 1.532 0 01-.947-2.287c.836-1.372-.734-2.942-2.106-2.106a1.532 1.532 0 01-2.287-.947zM10 13a3 3 0 100-6 3 3 0 000 6z" clip-rule="evenodd"/></svg>
+              Automation
+            </a>
+            <a class="nav-link" data-route="/runbooks" href="#/runbooks" id="navRunbooks">
+              <svg viewBox="0 0 20 20" fill="currentColor"><path d="M9 4.804A7.968 7.968 0 005.5 4c-1.255 0-2.443.29-3.5.804v10A7.969 7.969 0 015.5 14c1.669 0 3.218.51 4.5 1.385A7.962 7.962 0 0114.5 14c1.255 0 2.443.29 3.5.804v-10A7.968 7.968 0 0014.5 4c-1.255 0-2.443.29-3.5.804V12a1 1 0 11-2 0V4.804z"/></svg>
+              Runbooks
+            </a>
+            <a class="nav-link" data-route="/settings" href="#/settings" id="navSettings">
+              <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M11.49 3.17c-.38-1.56-2.6-1.56-2.98 0a1.532 1.532 0 01-2.286.948c-1.372-.836-2.942.734-2.106 2.106.54.886.061 2.042-.947 2.287-1.561.379-1.561 2.6 0 2.978a1.532 1.532 0 01.947 2.287c-.836 1.372.734 2.942 2.106 2.106a1.532 1.532 0 012.287.947c.379 1.561 2.6 1.561 2.978 0a1.533 1.533 0 012.287-.947c1.372.836 2.942-.734 2.106-2.106a1.533 1.533 0 01.947-2.287c1.561-.379 1.561-2.6 0-2.978a1.532 1.532 0 01-.947-2.287c.836-1.372-.734-2.942-2.106-2.106a1.532 1.532 0 01-2.287-.947zM10 13a3 3 0 100-6 3 3 0 000 6z" clip-rule="evenodd"/></svg>
+              Settings
+            </a>
+          </nav>
+
+          <!-- Server inventory -->
+          <div class="srv-section">
+            <div class="sidebar-head">
+              <span>Servers</span>
+              <span class="count" id="serverCount">0</span>
+            </div>
+            <ul class="server-list" id="serverList"></ul>
+            <button class="add-btn" id="addServerBtn">
+              <span class="plus">+</span> Add server
+            </button>
           </div>
-          <ul class="server-list" id="serverList"></ul>
-          <button class="add-btn" id="addServerBtn">
-            <span class="plus">+</span> Add server
-          </button>
-          <p class="sidebar-note">
-            Metrics are read live over SSH (or from this machine). Nothing is simulated.
-          </p>
         </aside>
 
-        <!-- Main -->
-        <main class="main" id="main">
-          <!-- Overview strip -->
+        <!-- ═══════════════ PAGE: DASHBOARD ═══════════════ -->
+        <main class="main page" id="pageDashboard">
           <section class="overview">
             <div class="ident">
               <div class="ident-name" id="selName">—</div>
@@ -79,7 +107,6 @@
             </div>
           </section>
 
-          <!-- Hero: 3D topology + system facts -->
           <section class="row hero-row">
             <div class="panel topo">
               <div class="panel-head"><span>Topology</span><span class="panel-hint" id="topoHint">drag to orbit</span></div>
@@ -96,7 +123,6 @@
             </div>
           </section>
 
-          <!-- Workloads -->
           <section class="row work-row">
             <div class="panel">
               <div class="panel-head"><span>Top processes</span><span class="panel-hint" id="procHint"></span></div>
@@ -108,7 +134,6 @@
             </div>
           </section>
 
-          <!-- Logs + AI -->
           <section class="row triage-row">
             <div class="panel term-panel">
               <div class="panel-head">
@@ -120,7 +145,10 @@
             <div class="panel ai-panel">
               <div class="panel-head">
                 <span>AI incident analysis</span>
-                <button class="analyze-btn" id="analyzeBtn">Analyze recent logs</button>
+                <div class="panel-actions">
+                  <button class="analyze-btn" id="analyzeBtn">Analyze recent logs</button>
+                  <button class="analyze-btn incident-btn" id="createIncidentBtn" hidden>Create incident</button>
+                </div>
               </div>
               <div class="ai-body" id="aiBody">
                 <div class="ai-empty">
@@ -130,9 +158,121 @@
             </div>
           </section>
         </main>
+
+        <!-- ═══════════════ PAGE: GODMODE ═══════════════ -->
+        <main class="main page" id="pageGodmode" hidden>
+          <div class="page-header">
+            <h1 class="page-title">GodMode <span class="page-title-sub">Fleet Command Center</span></h1>
+          </div>
+          <section class="gm-stats" id="gmStats"></section>
+          <section class="row gm-row">
+            <div class="panel gm-heatmap-panel">
+              <div class="panel-head"><span>Fleet Heatmap</span><span class="panel-hint">click a server to drill down</span></div>
+              <div class="gm-heatmap" id="gmHeatmap"></div>
+            </div>
+            <div class="panel gm-timeline-panel">
+              <div class="panel-head"><span>Alert Timeline</span></div>
+              <div class="gm-timeline" id="gmTimeline"></div>
+            </div>
+          </section>
+          <section class="row gm-row">
+            <div class="panel">
+              <div class="panel-head"><span>Top Offenders</span><span class="panel-hint">highest resource usage</span></div>
+              <div class="gm-offenders" id="gmOffenders"></div>
+            </div>
+            <div class="panel">
+              <div class="panel-head"><span>Incident Summary</span></div>
+              <div class="gm-incident-summary" id="gmIncidentSummary"></div>
+            </div>
+          </section>
+        </main>
+
+        <!-- ═══════════════ PAGE: INCIDENTS ═══════════════ -->
+        <main class="main page" id="pageIncidents" hidden>
+          <div class="page-header">
+            <h1 class="page-title">Incidents</h1>
+            <div class="page-actions">
+              <select class="filter-select" id="incFilterStatus">
+                <option value="">All statuses</option>
+                <option value="open">Open</option>
+                <option value="acknowledged">Acknowledged</option>
+                <option value="investigating">Investigating</option>
+                <option value="mitigated">Mitigated</option>
+                <option value="resolved">Resolved</option>
+              </select>
+              <select class="filter-select" id="incFilterSeverity">
+                <option value="">All severities</option>
+                <option value="critical">Critical</option>
+                <option value="warning">Warning</option>
+                <option value="info">Info</option>
+              </select>
+              <button class="btn primary small" id="createIncidentModalBtn">+ New Incident</button>
+            </div>
+          </div>
+          <div class="inc-board" id="incBoard"></div>
+          <!-- Incident detail panel (shown when clicking an incident) -->
+          <div class="inc-detail-panel" id="incDetailPanel" hidden>
+            <div class="inc-detail" id="incDetail"></div>
+          </div>
+        </main>
+
+        <!-- ═══════════════ PAGE: AUTOMATION ═══════════════ -->
+        <main class="main page" id="pageAutomation" hidden>
+          <div class="page-header">
+            <h1 class="page-title">Automation</h1>
+          </div>
+          <section class="row auto-row">
+            <div class="panel auto-runbooks-panel">
+              <div class="panel-head"><span>Available Runbooks</span></div>
+              <div class="auto-runbooks" id="autoRunbooks"></div>
+            </div>
+            <div class="panel auto-exec-panel">
+              <div class="panel-head"><span>Execution Console</span></div>
+              <div class="auto-exec" id="autoExec">
+                <div class="empty">Select a runbook and target server, then click <b>Execute</b>.</div>
+              </div>
+            </div>
+          </section>
+          <section class="panel">
+            <div class="panel-head"><span>Execution History</span></div>
+            <div class="auto-history" id="autoHistory"></div>
+          </section>
+        </main>
+
+        <!-- ═══════════════ PAGE: RUNBOOKS ═══════════════ -->
+        <main class="main page" id="pageRunbooks" hidden>
+          <div class="page-header">
+            <h1 class="page-title">Runbook Library</h1>
+            <div class="page-actions">
+              <input type="search" class="search-input" id="rbSearch" placeholder="Search runbooks…" />
+              <select class="filter-select" id="rbCategoryFilter">
+                <option value="">All categories</option>
+                <option value="storage">Storage</option>
+                <option value="compute">Compute</option>
+                <option value="network">Network</option>
+                <option value="security">Security</option>
+                <option value="general">General</option>
+              </select>
+              <button class="btn primary small" id="createRunbookBtn">+ New Runbook</button>
+            </div>
+          </div>
+          <div class="rb-grid" id="rbGrid"></div>
+          <div class="rb-detail-panel" id="rbDetailPanel" hidden>
+            <div class="rb-detail" id="rbDetail"></div>
+          </div>
+        </main>
+
+        <!-- ═══════════════ PAGE: SETTINGS ═══════════════ -->
+        <main class="main page" id="pageSettings" hidden>
+          <div class="page-header">
+            <h1 class="page-title">Settings</h1>
+          </div>
+          <div class="settings-grid" id="settingsGrid"></div>
+        </main>
       </div>
     </div>
 
+    <!-- ═══════════════ MODALS ═══════════════ -->
     <!-- Add-server modal -->
     <div class="modal-scrim" id="modalScrim" hidden>
       <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
@@ -166,13 +306,53 @@
           <div class="modal-msg" id="modalMsg" hidden></div>
           <div class="modal-actions">
             <button type="button" class="btn ghost" id="testBtn">Test connection</button>
+            <button type="button" class="btn ghost" id="addLocalBtn" style="color:var(--cyan)">Monitor this laptop</button>
             <button type="submit" class="btn primary" id="saveBtn">Add &amp; monitor</button>
           </div>
         </form>
       </div>
     </div>
 
+    <!-- Create incident modal -->
+    <div class="modal-scrim" id="incModalScrim" hidden>
+      <div class="modal" role="dialog" aria-modal="true">
+        <div class="modal-head">
+          <h2>Create Incident</h2>
+          <button class="modal-x" id="incModalClose" aria-label="Close">×</button>
+        </div>
+        <form id="incForm" class="modal-form">
+          <label>Title <input name="title" placeholder="High CPU on prod-web-01" required autocomplete="off" /></label>
+          <div class="grid2">
+            <label>Severity
+              <select name="severity">
+                <option value="critical">Critical</option>
+                <option value="warning" selected>Warning</option>
+                <option value="info">Info</option>
+              </select>
+            </label>
+            <label>Server
+              <select name="serverId" id="incServerSelect"></select>
+            </label>
+          </div>
+          <label>Description <textarea name="description" rows="3" placeholder="Describe the incident…"></textarea></label>
+          <label>Assignee <input name="assignee" placeholder="on-call engineer" autocomplete="off" /></label>
+          <label>Tags (comma-separated) <input name="tags" placeholder="cpu, production" autocomplete="off" /></label>
+          <div class="modal-msg" id="incModalMsg" hidden></div>
+          <div class="modal-actions">
+            <button type="button" class="btn ghost" id="incModalCancel">Cancel</button>
+            <button type="submit" class="btn primary">Create Incident</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-    <script src="/app.js"></script>
+    <script src="/router.js?v=3"></script>
+    <script src="/godmode.js?v=3"></script>
+    <script src="/incidents.js?v=3"></script>
+    <script src="/automation.js?v=3"></script>
+    <script src="/runbooks.js?v=3"></script>
+    <script src="/settings.js?v=3"></script>
+    <script src="/app.js?v=3"></script>
   </body>
 </html>

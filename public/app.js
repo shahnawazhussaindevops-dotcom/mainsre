@@ -1,669 +1,707 @@
 /* ═══════════════════════════════════════════════════════════════════════
-   SREAI — front-end controller
-   Vanilla JS. Talks to the real backend over REST + WebSocket.
-   Nothing here is simulated: every number comes from a live telemetry frame.
+   SREAI — Main Application Bootstrap
+   Initializes router, websocket, and global state.
    ═════════════════════════════════════════════════════════════════════ */
 'use strict';
 
-/* ── State ──────────────────────────────────────────────────────────── */
-const state = {
-  config: { aiProvider: '—', refreshMs: 3000 },
-  servers: [],                 // sanitized inventory from the server
-  telemetry: new Map(),        // id -> latest telemetry frame
-  logs: new Map(),             // id -> string[]  (accumulated, capped)
+// Global state shared across modules
+window._sreState = {
+  servers: [],
+  telemetry: new Map(),
   selectedId: null,
-  analyzing: false,
 };
 
-const LOG_CAP = 400;
-const STATUS_COLOR = { healthy: '#37e39b', warning: '#ffce5c', critical: '#ff5c7c', unknown: '#59616f' };
-const STATUS_HEX = { healthy: 0x37e39b, warning: 0xffce5c, critical: 0xff5c7c, unknown: 0x59616f };
+const App = (() => {
+  let ws;
 
-/* ── DOM helpers ────────────────────────────────────────────────────── */
-const $ = (id) => document.getElementById(id);
-const el = {
-  aiProvider: $('aiProvider'), refreshRate: $('refreshRate'),
-  liveState: $('liveState'), liveLabel: $('liveLabel'),
-  serverList: $('serverList'), serverCount: $('serverCount'), addServerBtn: $('addServerBtn'),
-  selName: $('selName'), selHost: $('selHost'), selMeta: $('selMeta'),
-  scoreNum: $('scoreNum'), scoreWrap: $('scoreWrap'),
-  cpuVal: $('cpuVal'), memVal: $('memVal'), diskVal: $('diskVal'),
-  factList: $('factList'), loadWrap: $('loadWrap'), loadVals: $('loadVals'),
-  procList: $('procList'), procHint: $('procHint'), workloads: $('workloads'),
-  terminal: $('terminal'), analyzeBtn: $('analyzeBtn'), aiBody: $('aiBody'),
-  topoCanvas: $('topoCanvas'), topoTip: $('topoTip'), topoHint: $('topoHint'),
-  // modal
-  modalScrim: $('modalScrim'), modalClose: $('modalClose'), addForm: $('addForm'),
-  pwField: $('pwField'), keyFields: $('keyFields'),
-  testBtn: $('testBtn'), saveBtn: $('saveBtn'), modalMsg: $('modalMsg'),
-};
-
-const gaugeFills = {
-  cpu: document.querySelector('.gauge[data-metric="cpu"] .g-fill'),
-  mem: document.querySelector('.gauge[data-metric="mem"] .g-fill'),
-  disk: document.querySelector('.gauge[data-metric="disk"] .g-fill'),
-};
-const GAUGE_CIRC = 2 * Math.PI * 52; // r=52 in the SVG
-
-/* ── Small utilities ────────────────────────────────────────────────── */
-function esc(s) {
-  return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-}
-function fmtPct(v) { return v == null || Number.isNaN(v) ? '—' : Math.round(v); }
-function fmtBytes(b) {
-  if (b == null) return '—';
-  const u = ['B', 'KB', 'MB', 'GB', 'TB'];
-  let i = 0, n = b;
-  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
-  return `${n.toFixed(n >= 100 || i === 0 ? 0 : 1)} ${u[i]}`;
-}
-function fmtUptime(sec) {
-  if (sec == null) return '—';
-  const d = Math.floor(sec / 86400), h = Math.floor((sec % 86400) / 3600), m = Math.floor((sec % 3600) / 60);
-  if (d > 0) return `${d}d ${h}h`;
-  if (h > 0) return `${h}h ${m}m`;
-  return `${m}m`;
-}
-function platformLabel(p) {
-  return { win32: 'Windows', darwin: 'macOS', linux: 'Linux' }[p] || p || '—';
-}
-function metricStatus(metric, v) {
-  if (v == null) return 'unknown';
-  const th = { cpu: [70, 90], mem: [80, 92], disk: [85, 95] }[metric];
-  if (v >= th[1]) return 'critical';
-  if (v >= th[0]) return 'warning';
-  return 'healthy';
-}
-function selected() { return state.telemetry.get(state.selectedId); }
-
-/* ── WebSocket ──────────────────────────────────────────────────────── */
-let ws = null;
-let reconnectTimer = null;
-
-function setLive(on) {
-  el.liveState.dataset.live = on ? 'on' : 'off';
-  el.liveLabel.textContent = on ? 'live' : 'reconnecting…';
-}
-
-function connect() {
-  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  ws = new WebSocket(`${proto}://${location.host}`);
-
-  ws.addEventListener('open', () => {
-    setLive(true);
-    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
-  });
-  ws.addEventListener('close', () => {
-    setLive(false);
-    if (!reconnectTimer) reconnectTimer = setTimeout(connect, 1500);
-  });
-  ws.addEventListener('error', () => ws.close());
-  ws.addEventListener('message', (ev) => {
-    let msg;
-    try { msg = JSON.parse(ev.data); } catch { return; }
-    handleMessage(msg);
-  });
-}
-
-function handleMessage(msg) {
-  if (msg.type === 'inventory') {
-    state.servers = msg.servers || [];
-    if (!state.selectedId || !state.servers.some((s) => s.id === state.selectedId)) {
-      state.selectedId = state.servers[0]?.id || null;
-    }
-    renderServerList();
-    renderSelected();
-    Topo.sync();
-  } else if (msg.type === 'telemetry') {
-    const d = msg.data;
-    if (!d || !d.id) return;
-    state.telemetry.set(d.id, d);
-    renderServerList();          // sidebar dots + cpu
-    Topo.recolor();
-    if (d.id === state.selectedId) renderSelected();
-  } else if (msg.type === 'log') {
-    const arr = state.logs.get(msg.serverId) || [];
-    for (const line of msg.lines) arr.push(line);
-    if (arr.length > LOG_CAP) arr.splice(0, arr.length - LOG_CAP);
-    state.logs.set(msg.serverId, arr);
-    if (msg.serverId === state.selectedId) renderTerminal();
+  function esc(s) {
+    return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   }
-}
 
-/* ── Rendering: sidebar ─────────────────────────────────────────────── */
-function renderServerList() {
-  el.serverCount.textContent = state.servers.length;
-  el.serverList.innerHTML = '';
-  for (const s of state.servers) {
-    const t = state.telemetry.get(s.id);
-    const status = t ? (t.status || 'unknown') : 'unknown';
-    const li = document.createElement('li');
-    li.className = 'srv' + (s.id === state.selectedId ? ' active' : '');
-    li.dataset.id = s.id;
-    const cpu = t && t.ok && t.cpuPct != null ? `${fmtPct(t.cpuPct)}%` : (t && !t.ok ? 'offline' : '…');
-    li.innerHTML = `
-      <div class="srv-top">
-        <span class="srv-dot" style="background:${STATUS_COLOR[status]}"></span>
-        <span class="srv-name">${esc(s.name)}</span>
-      </div>
-      <div class="srv-host">${esc(s.kind === 'local' ? 'this machine' : s.host)}</div>
-      <span class="srv-cpu">${cpu}</span>
-      ${s.builtin ? '' : `<button class="srv-del" title="Remove" data-del="${s.id}">×</button>`}`;
-    li.addEventListener('click', (e) => {
-      if (e.target.dataset.del) return;
-      state.selectedId = s.id;
+  // --- WebSocket ---
+  function connectWs() {
+    const loc = window.location;
+    const proto = loc.protocol === 'https:' ? 'wss:' : 'ws:';
+    ws = new WebSocket(`${proto}//${loc.host}/`);
+
+    ws.onopen = () => {
+      document.getElementById('liveState').dataset.live = 'on';
+      document.getElementById('liveLabel').textContent = 'live';
+    };
+
+    ws.onclose = () => {
+      document.getElementById('liveState').dataset.live = 'off';
+      document.getElementById('liveLabel').textContent = 'reconnecting…';
+      setTimeout(connectWs, 3000);
+    };
+
+    ws.onmessage = (e) => {
+      try {
+        const msg = JSON.parse(e.data);
+        handleMessage(msg);
+      } catch (err) {
+        console.error('WS parse err:', err);
+      }
+    };
+  }
+
+  function handleMessage(msg) {
+    if (msg.type === 'inventory') {
+      window._sreState.servers = msg.servers || [];
       renderServerList();
-      renderSelected();
-      Topo.recolor();
-    });
-    const del = li.querySelector('[data-del]');
-    if (del) del.addEventListener('click', (e) => { e.stopPropagation(); removeServer(s.id, s.name); });
-    el.serverList.appendChild(li);
-  }
-}
-
-/* ── Rendering: everything for the selected server ──────────────────── */
-function renderSelected() {
-  const s = state.servers.find((x) => x.id === state.selectedId);
-  const t = selected();
-  el.selName.textContent = s ? s.name : '—';
-  el.selHost.textContent = s ? (s.kind === 'local' ? '127.0.0.1 · local' : `${s.host}${s.port && s.port !== 22 ? ':' + s.port : ''}`) : '—';
-
-  if (t && !t.ok) {
-    el.selMeta.textContent = `offline — ${t.error || 'unreachable'}`;
-    el.scoreNum.textContent = '0';
-    el.scoreNum.style.color = STATUS_COLOR.critical;
-    setGauge('cpu', null); setGauge('mem', null); setGauge('disk', null);
-    renderFacts(t); renderProcs(null); renderWorkloads(null); renderTerminal();
-    return;
-  }
-  if (!t) {
-    el.selMeta.textContent = 'waiting for first sample…';
-    el.scoreNum.textContent = '—';
-    el.scoreNum.style.color = '';
-    setGauge('cpu', null); setGauge('mem', null); setGauge('disk', null);
-    renderFacts(null); renderProcs(null); renderWorkloads(null); renderTerminal();
-    return;
-  }
-
-  el.selMeta.textContent = `${platformLabel(t.platform)} · ${t.hostname || '—'} · up ${fmtUptime(t.uptimeSec)}`;
-  el.scoreNum.textContent = t.score != null ? t.score : '—';
-  el.scoreNum.style.color = STATUS_COLOR[t.status] || '';
-  setGauge('cpu', t.cpuPct);
-  setGauge('mem', t.memPct);
-  setGauge('disk', t.diskPct);
-  renderFacts(t);
-  renderProcs(t);
-  renderWorkloads(t);
-  renderTerminal();
-}
-
-function setGauge(metric, v) {
-  const fill = gaugeFills[metric];
-  const label = el[metric + 'Val'];
-  if (label) label.textContent = fmtPct(v);
-  if (!fill) return;
-  const pct = v == null ? 0 : Math.max(0, Math.min(100, v));
-  fill.style.strokeDasharray = GAUGE_CIRC.toFixed(1);
-  fill.style.strokeDashoffset = (GAUGE_CIRC * (1 - pct / 100)).toFixed(1);
-  fill.style.stroke = STATUS_COLOR[metricStatus(metric, v)];
-}
-
-function renderFacts(t) {
-  const rows = [];
-  if (t && t.ok) {
-    rows.push(['Hostname', esc(t.hostname || '—')]);
-    rows.push(['Platform', platformLabel(t.platform)]);
-    rows.push(['Uptime', fmtUptime(t.uptimeSec)]);
-    rows.push(['Memory', `${fmtBytes(t.memUsedBytes)} / ${fmtBytes(t.memTotalBytes)}`]);
-    rows.push(['Disk', `${fmtBytes(t.diskUsedBytes)} / ${fmtBytes(t.diskTotalBytes)}`]);
-    rows.push(['Processes', t.procs ? t.procs.length : 0]);
-    rows.push(['Last sample', new Date(t.ts).toLocaleTimeString()]);
-    el.factList.innerHTML = rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
-    if (Array.isArray(t.load) && t.load.some((n) => n > 0)) {
-      el.loadWrap.hidden = false;
-      el.loadVals.textContent = t.load.map((n) => (n || 0).toFixed(2)).join('   ');
-    } else {
-      el.loadWrap.hidden = true;
-    }
-  } else if (t && !t.ok) {
-    el.factList.innerHTML = `<dt>Status</dt><dd style="color:${STATUS_COLOR.critical}">offline</dd><dt>Error</dt><dd>${esc(t.error || 'unreachable')}</dd>`;
-    el.loadWrap.hidden = true;
-  } else {
-    el.factList.innerHTML = `<dt>Status</dt><dd>connecting…</dd>`;
-    el.loadWrap.hidden = true;
-  }
-}
-
-function renderProcs(t) {
-  if (!t || !t.ok || !t.procs || !t.procs.length) {
-    el.procList.innerHTML = `<div class="empty">${t && t.ok ? 'No process data available.' : 'Waiting for data…'}</div>`;
-    el.procHint.textContent = '';
-    return;
-  }
-  const byCpu = t.procs.some((p) => p.cpu != null);
-  el.procHint.textContent = byCpu ? 'by CPU' : 'by memory';
-  const ranked = [...t.procs].sort((a, b) => ((byCpu ? b.cpu : b.mem) || 0) - ((byCpu ? a.cpu : a.mem) || 0));
-  el.procList.innerHTML = ranked.slice(0, 8).map((p) => {
-    const val = byCpu ? p.cpu : p.mem;
-    const pctText = byCpu
-      ? (p.cpu != null ? `${p.cpu.toFixed(1)}%` : '—')
-      : (p.mem != null ? `${p.mem.toFixed(1)}%` : '—');
-    const width = Math.max(2, Math.min(100, val || 0));
-    return `
-      <div class="proc">
-        <span class="proc-name">${esc(p.name || '?')} <span>#${p.pid ?? '—'}</span></span>
-        <span class="proc-val">${pctText}</span>
-      </div>
-      <div class="proc-bar-wrap"><div class="proc-bar" style="width:${width}%"></div></div>`;
-  }).join('');
-}
-
-function renderWorkloads(t) {
-  if (!t || !t.ok) { el.workloads.innerHTML = `<div class="empty">Waiting for data…</div>`; return; }
-  const docker = t.docker || [];
-  const pods = t.pods || [];
-  if (!docker.length && !pods.length) {
-    el.workloads.innerHTML = `<div class="empty">No containers or pods detected.<br/>Docker / Kubernetes will appear here when present on the host.</div>`;
-    return;
-  }
-  let html = '';
-  if (docker.length) {
-    html += `<div><div class="wl-group-cap">Docker · ${docker.length}</div><div class="wl-chips">` +
-      docker.map((c) => {
-        const bad = !/^up/i.test(c.status || '');
-        return `<span class="wl-chip ${bad ? 'bad' : ''}" title="${esc(c.status || '')}"><span class="d"></span>${esc(c.name || '?')} <span class="img">${esc((c.image || '').split(':')[0])}</span></span>`;
-      }).join('') + `</div></div>`;
-  }
-  if (pods.length) {
-    html += `<div><div class="wl-group-cap">Kubernetes · ${pods.length}</div><div class="wl-chips">` +
-      pods.map((p) => {
-        const bad = !/running|completed/i.test(p.status || '');
-        return `<span class="wl-chip ${bad ? 'bad' : ''}" title="${esc(p.ns || '')} · ${esc(p.status || '')}"><span class="d"></span>${esc(p.name || '?')} <span class="img">${esc(p.ready || '')} ${esc(p.status || '')}</span></span>`;
-      }).join('') + `</div></div>`;
-  }
-  el.workloads.innerHTML = html;
-}
-
-/* ── Terminal (live logs) ───────────────────────────────────────────── */
-// Single non-overlapping pass so IPs aren't mangled by the numeric rule.
-const HL_RE = /(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})|\b(error|fatal|critical|panic|failed|failure|oom|refused|segfault|denied|killed)\b|\b(warn(?:ing)?|timed out|timeout|retry|degraded)\b|\b(\d{3,})\b/gi;
-function highlight(line) {
-  return esc(line).replace(HL_RE, (m, ip, err, warn, num) => {
-    if (ip) return `<span class="tok-ip">${ip}</span>`;
-    if (err) return `<span class="tok-err">${err}</span>`;
-    if (warn) return `<span class="tok-warn">${warn}</span>`;
-    if (num) return `<span class="tok-num">${num}</span>`;
-    return m;
-  });
-}
-
-function renderTerminal() {
-  const logs = state.logs.get(state.selectedId) || [];
-  if (!logs.length) {
-    el.terminal.innerHTML = `<div class="empty">No log lines yet. Streaming as they arrive…</div>`;
-    return;
-  }
-  const atBottom = el.terminal.scrollHeight - el.terminal.scrollTop - el.terminal.clientHeight < 40;
-  el.terminal.innerHTML = logs.map((l) => `<div class="log-line" title="Click to copy &amp; analyze">${highlight(l)}</div>`).join('');
-  el.terminal.querySelectorAll('.log-line').forEach((node, i) => {
-    node.addEventListener('click', () => onLogClick(node, logs[i]));
-  });
-  if (atBottom) el.terminal.scrollTop = el.terminal.scrollHeight;
-}
-
-async function onLogClick(node, line) {
-  try { await navigator.clipboard.writeText(line); } catch { /* ignore */ }
-  node.classList.add('copied');
-  setTimeout(() => node.classList.remove('copied'), 700);
-  runAnalyze(line);
-}
-
-/* ── AI analysis ────────────────────────────────────────────────────── */
-el.analyzeBtn.addEventListener('click', () => {
-  const logs = state.logs.get(state.selectedId) || [];
-  runAnalyze(logs.slice(-25).join('\n'));
-});
-
-async function runAnalyze(logText) {
-  if (state.analyzing || !state.selectedId) return;
-  state.analyzing = true;
-  el.analyzeBtn.disabled = true;
-  el.aiBody.innerHTML = `<div class="ai-empty"><span class="spinner"></span>Analyzing with ${esc(state.config.aiProvider)}…</div>`;
-  try {
-    const res = await fetch('/api/analyze', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ serverId: state.selectedId, log: logText || '' }),
-    });
-    const r = await res.json();
-    if (!res.ok) throw new Error(r.error || 'Analysis failed.');
-    renderAI(r);
-  } catch (e) {
-    el.aiBody.innerHTML = `<div class="ai-empty" style="color:var(--red)">Analysis failed: ${esc(e.message)}</div>`;
-  } finally {
-    state.analyzing = false;
-    el.analyzeBtn.disabled = false;
-  }
-}
-
-function renderAI(r) {
-  const sev = r.severity || 'info';
-  const sevColor = { info: 'var(--cyan)', warning: 'var(--amber)', critical: 'var(--red)' }[sev] || 'var(--cyan)';
-  el.aiBody.innerHTML = `
-    <span class="ai-sev" style="border-color:${sevColor}"><span class="d" style="background:${sevColor}"></span>${esc(sev)}</span>
-    <div class="ai-summary">${esc(r.summary || '')}</div>
-    <div class="ai-rca">${esc(r.rootCause || '')}</div>
-    ${r.command ? `
-      <div class="ai-cmd-cap">Suggested command</div>
-      <div class="ai-cmd"><button class="ai-copy" id="aiCopy">copy</button>${esc(r.command)}</div>` : ''}
-    <div class="ai-foot">
-      <span class="ai-risk risk-${esc(r.risk || 'safe')}">risk: ${esc(r.risk || 'safe')}</span>
-      <span>source: ${esc(r.source || 'rule-based')}</span>
-    </div>
-    ${r.note ? `<div class="ai-note">⚠ ${esc(r.note)}</div>` : ''}`;
-  const copyBtn = $('aiCopy');
-  if (copyBtn) copyBtn.addEventListener('click', async () => {
-    try { await navigator.clipboard.writeText(r.command); copyBtn.textContent = 'copied'; setTimeout(() => (copyBtn.textContent = 'copy'), 1200); } catch { /* ignore */ }
-  });
-}
-
-/* ── Add / remove server ────────────────────────────────────────────── */
-async function removeServer(id, name) {
-  if (!confirm(`Stop monitoring "${name}" and delete its saved credentials?`)) return;
-  try {
-    const res = await fetch(`/api/servers/${id}`, { method: 'DELETE' });
-    if (!res.ok) { const r = await res.json().catch(() => ({})); throw new Error(r.error || 'Delete failed.'); }
-    state.telemetry.delete(id);
-    state.logs.delete(id);
-  } catch (e) { alert(e.message); }
-}
-
-/* Modal wiring */
-let authMode = 'password';
-function openModal() {
-  el.addForm.reset();
-  authMode = 'password';
-  document.querySelectorAll('.auth-opt').forEach((b) => b.classList.toggle('active', b.dataset.auth === 'password'));
-  el.pwField.hidden = false;
-  el.keyFields.hidden = true;
-  el.modalMsg.hidden = true;
-  el.modalScrim.hidden = false;
-}
-function closeModal() { el.modalScrim.hidden = true; }
-
-el.addServerBtn.addEventListener('click', openModal);
-el.modalClose.addEventListener('click', closeModal);
-el.modalScrim.addEventListener('click', (e) => { if (e.target === el.modalScrim) closeModal(); });
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !el.modalScrim.hidden) closeModal(); });
-
-document.querySelectorAll('.auth-opt').forEach((btn) => {
-  btn.addEventListener('click', () => {
-    authMode = btn.dataset.auth;
-    document.querySelectorAll('.auth-opt').forEach((b) => b.classList.toggle('active', b === btn));
-    el.pwField.hidden = authMode !== 'password';
-    el.keyFields.hidden = authMode !== 'key';
-  });
-});
-
-function formPayload() {
-  const f = new FormData(el.addForm);
-  const p = {
-    name: (f.get('name') || '').trim(),
-    host: (f.get('host') || '').trim(),
-    port: (f.get('port') || '22').trim(),
-    username: (f.get('username') || '').trim(),
-  };
-  if (authMode === 'password') p.password = f.get('password') || '';
-  else { p.privateKey = f.get('privateKey') || ''; p.passphrase = f.get('passphrase') || ''; }
-  return p;
-}
-function modalMsg(kind, text) {
-  el.modalMsg.hidden = false;
-  el.modalMsg.className = `modal-msg ${kind}`;
-  el.modalMsg.textContent = text;
-}
-
-el.addForm.addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const payload = formPayload();
-  el.saveBtn.disabled = true;
-  modalMsg('ok', 'Connecting & saving…');
-  try {
-    const res = await fetch('/api/servers', {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload),
-    });
-    const r = await res.json();
-    if (!res.ok) throw new Error(r.error || 'Could not add server.');
-    state.selectedId = r.id;
-    modalMsg('ok', 'Added. Streaming telemetry…');
-    setTimeout(closeModal, 500);
-  } catch (err) {
-    modalMsg('err', err.message);
-  } finally {
-    el.saveBtn.disabled = false;
-  }
-});
-
-el.testBtn.addEventListener('click', async () => {
-  const payload = formPayload();
-  if (!payload.host || !payload.username) { modalMsg('err', 'Host and username are required to test.'); return; }
-  el.testBtn.disabled = true;
-  modalMsg('ok', 'Testing SSH connection…');
-  try {
-    const res = await fetch('/api/test', {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload),
-    });
-    const r = await res.json();
-    if (!res.ok || r.ok === false) throw new Error(r.error || 'Connection failed.');
-    modalMsg('ok', `✓ ${r.message || 'Connection succeeded.'} — click “Add & monitor” to save.`);
-  } catch (err) {
-    modalMsg('err', err.message);
-  } finally {
-    el.testBtn.disabled = false;
-  }
-});
-
-/* ═══════════════════════════════════════════════════════════════════════
-   Three.js topology  (hub + one node per server, colored by live health)
-   Degrades gracefully to a text fallback if the CDN script is unavailable.
-   ═════════════════════════════════════════════════════════════════════ */
-const Topo = (() => {
-  let renderer, scene, camera, pivot, hub, raf;
-  let nodes = new Map();          // id -> { mesh, glow, line, base }
-  const rot = { x: -0.35, y: 0.4, tx: -0.35, ty: 0.4 };
-  const drag = { on: false, moved: false, x: 0, y: 0 };
-  let raycaster, mouse, hoverId = null;
-  const RADIUS = 3.3;
-
-  function available() { return typeof window.THREE !== 'undefined'; }
-
-  function init() {
-    if (!available()) {
-      el.topoCanvas.innerHTML = `<div class="topo-fallback">3D topology needs the Three.js library (blocked offline).<br/>All live metrics below still work.</div>`;
-      if (el.topoHint) el.topoHint.textContent = '';
-      return;
-    }
-    const w = el.topoCanvas.clientWidth || 600;
-    const h = el.topoCanvas.clientHeight || 300;
-    scene = new THREE.Scene();
-    camera = new THREE.PerspectiveCamera(46, w / h, 0.1, 100);
-    camera.position.set(0, 1.6, 8.4);
-    camera.lookAt(0, 0, 0);
-    renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-    renderer.setSize(w, h);
-    el.topoCanvas.appendChild(renderer.domElement);
-
-    pivot = new THREE.Group();
-    scene.add(pivot);
-
-    // Central hub
-    hub = new THREE.Mesh(
-      new THREE.IcosahedronGeometry(0.5, 1),
-      new THREE.MeshBasicMaterial({ color: 0x35e5ff, wireframe: true, transparent: true, opacity: 0.85 })
-    );
-    pivot.add(hub);
-    const hubGlow = new THREE.Mesh(
-      new THREE.SphereGeometry(0.72, 24, 24),
-      new THREE.MeshBasicMaterial({ color: 0x35e5ff, transparent: true, opacity: 0.08 })
-    );
-    pivot.add(hubGlow);
-
-    raycaster = new THREE.Raycaster();
-    mouse = new THREE.Vector2();
-
-    bindEvents();
-    animate();
-    window.addEventListener('resize', onResize);
-  }
-
-  function nodeColor(id) {
-    const t = state.telemetry.get(id);
-    const status = t ? (t.status || 'unknown') : 'unknown';
-    return STATUS_HEX[status] ?? STATUS_HEX.unknown;
-  }
-
-  function sync() {
-    if (!available() || !scene) return;
-    const ids = state.servers.map((s) => s.id);
-    // remove stale
-    for (const [id, n] of nodes) {
-      if (!ids.includes(id)) { pivot.remove(n.mesh); pivot.remove(n.glow); pivot.remove(n.line); nodes.delete(id); }
-    }
-    // (re)position all
-    ids.forEach((id, i) => {
-      const angle = (i / Math.max(1, ids.length)) * Math.PI * 2;
-      const pos = new THREE.Vector3(Math.cos(angle) * RADIUS, Math.sin(i * 1.7) * 0.5, Math.sin(angle) * RADIUS);
-      let n = nodes.get(id);
-      if (!n) {
-        const color = nodeColor(id);
-        const mesh = new THREE.Mesh(new THREE.SphereGeometry(0.32, 24, 24), new THREE.MeshBasicMaterial({ color }));
-        mesh.userData.id = id;
-        const glow = new THREE.Mesh(new THREE.SphereGeometry(0.5, 20, 20), new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.14 }));
-        const lineGeo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, 0, 0), pos.clone()]);
-        const line = new THREE.Line(lineGeo, new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.35 }));
-        pivot.add(mesh); pivot.add(glow); pivot.add(line);
-        n = { mesh, glow, line };
-        nodes.set(id, n);
+      if (!window._sreState.selectedId && window._sreState.servers.length > 0) {
+        window._sreState.selectedId = window._sreState.servers[0].id;
+        if (Router.current() === '/dashboard') renderDashboard();
       }
-      n.mesh.position.copy(pos);
-      n.glow.position.copy(pos);
-      n.line.geometry.setFromPoints([new THREE.Vector3(0, 0, 0), pos.clone()]);
-      n.base = pos.clone();
-    });
-    recolor();
-  }
-
-  function recolor() {
-    if (!available() || !scene) return;
-    for (const [id, n] of nodes) {
-      const color = nodeColor(id);
-      n.mesh.material.color.setHex(color);
-      n.glow.material.color.setHex(color);
-      n.line.material.color.setHex(color);
-      const sel = id === state.selectedId;
-      const target = sel ? 1.5 : 1;
-      n.mesh.scale.setScalar(target);
-      n.glow.material.opacity = sel ? 0.28 : 0.14;
-      n.line.material.opacity = sel ? 0.6 : 0.3;
+    } else if (msg.type === 'telemetry') {
+      const t = msg.data;
+      window._sreState.telemetry.set(t.id, t);
+      updateServerSidebarStats(t.id);
+      
+      if (t.id === window._sreState.selectedId && Router.current() === '/dashboard') {
+        renderDashboard();
+      }
+      
+      if (window.GodMode) {
+        window.GodMode.trackStatusChange(t);
+        if (Router.current() === '/godmode') window.GodMode.render();
+      }
+    } else if (msg.type === 'log') {
+      if (msg.serverId === window._sreState.selectedId && Router.current() === '/dashboard') {
+        Dashboard.appendLogs(msg.lines);
+      }
+    } else if (msg.type === 'incident') {
+      if (window.Incidents) window.Incidents.handleWsIncident(msg);
+      if (window.GodMode && Router.current() === '/godmode') window.GodMode.render();
+    } else if (msg.type === 'automation' || msg.type === 'automation_step') {
+      if (window.Automation) window.Automation.handleWsMsg(msg);
     }
   }
 
-  function bindEvents() {
-    const c = renderer.domElement;
-    c.style.cursor = 'grab';
-    c.addEventListener('pointerdown', (e) => { drag.on = true; drag.moved = false; drag.x = e.clientX; drag.y = e.clientY; c.style.cursor = 'grabbing'; });
-    window.addEventListener('pointerup', (e) => {
-      if (drag.on && !drag.moved) pick(e, true);
-      drag.on = false; c.style.cursor = 'grab';
+  // --- Sidebar & General UI ---
+  function renderServerList() {
+    const list = document.getElementById('serverList');
+    if (!list) return;
+    
+    document.getElementById('serverCount').textContent = window._sreState.servers.length;
+    
+    list.innerHTML = window._sreState.servers.map((s) => `
+      <li class="srv ${s.id === window._sreState.selectedId ? 'active' : ''}" data-id="${s.id}">
+        <div class="srv-top">
+          <div class="srv-dot" id="dot-${s.id}"></div>
+          <div class="srv-name" title="${esc(s.name)}">${esc(s.name)}</div>
+        </div>
+        <div class="srv-host">${esc(s.host)}:${s.port || 22}</div>
+        <div class="srv-cpu" id="scpu-${s.id}">—</div>
+        <button class="srv-del" data-del="${s.id}" title="Remove server">×</button>
+      </li>
+    `).join('');
+
+    list.querySelectorAll('.srv').forEach((el) => {
+      el.addEventListener('click', (e) => {
+        if (e.target.closest('.srv-del')) return;
+        window._sreState.selectedId = el.dataset.id;
+        renderServerList(); // update active class
+        if (Router.current() === '/dashboard') renderDashboard();
+      });
     });
-    c.addEventListener('pointermove', (e) => {
-      if (drag.on) {
-        const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
-        if (Math.abs(dx) + Math.abs(dy) > 3) drag.moved = true;
-        rot.ty += dx * 0.008;
-        rot.tx = Math.max(-1.1, Math.min(1.1, rot.tx + dy * 0.008));
-        drag.x = e.clientX; drag.y = e.clientY;
+
+    list.querySelectorAll('.srv-del').forEach((btn) => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        if (!confirm('Remove this server?')) return;
+        const id = btn.dataset.del;
+        await fetch(`/api/servers/${id}`, { method: 'DELETE' });
+        if (window._sreState.selectedId === id) window._sreState.selectedId = null;
+      });
+    });
+
+    // Backfill stats if we already have telemetry
+    for (const [id, t] of window._sreState.telemetry.entries()) {
+      updateServerSidebarStats(id);
+    }
+  }
+
+  function updateServerSidebarStats(id) {
+    const t = window._sreState.telemetry.get(id);
+    const dot = document.getElementById(`dot-${id}`);
+    const scpu = document.getElementById(`scpu-${id}`);
+    if (dot && t) {
+      if (!t.ok) {
+        dot.style.background = 'var(--faint)';
+        dot.style.boxShadow = 'none';
+        if (scpu) scpu.textContent = 'err';
       } else {
-        pick(e, false);
+        const st = t.status || 'unknown';
+        const color = st === 'healthy' ? 'var(--green)' : st === 'warning' ? 'var(--amber)' : 'var(--red)';
+        dot.style.background = color;
+        dot.style.boxShadow = `0 0 6px ${color}`;
+        if (scpu) scpu.textContent = Math.round(t.cpuPct || 0) + '%';
       }
-    });
-    c.addEventListener('pointerleave', () => hideTip());
+    }
   }
 
-  function pick(e, doSelect) {
-    if (!raycaster) return;
-    const rect = renderer.domElement.getBoundingClientRect();
-    mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
-    mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
-    raycaster.setFromCamera(mouse, camera);
-    const hits = raycaster.intersectObjects([...nodes.values()].map((n) => n.mesh));
-    if (hits.length) {
-      const id = hits[0].object.userData.id;
-      if (doSelect) {
-        state.selectedId = id;
-        renderServerList(); renderSelected(); recolor();
+  // --- Add Server Modal ---
+  function initAddServer() {
+    const scrim = document.getElementById('modalScrim');
+    const form = document.getElementById('addForm');
+    const authOpts = document.querySelectorAll('.auth-opt');
+    let currentAuth = 'password';
+
+    document.getElementById('addServerBtn')?.addEventListener('click', () => {
+      scrim.hidden = false;
+      form.reset();
+      hideMsg();
+    });
+    
+    document.getElementById('modalClose')?.addEventListener('click', () => scrim.hidden = true);
+    scrim.addEventListener('click', (e) => { if (e.target === scrim) scrim.hidden = true; });
+
+    authOpts.forEach(b => b.addEventListener('click', () => {
+      authOpts.forEach(x => x.classList.remove('active'));
+      b.classList.add('active');
+      currentAuth = b.dataset.auth;
+      document.getElementById('pwField').hidden = currentAuth !== 'password';
+      document.getElementById('keyFields').hidden = currentAuth !== 'key';
+    }));
+
+    function hideMsg() {
+      const m = document.getElementById('modalMsg');
+      m.hidden = true; m.className = 'modal-msg'; m.textContent = '';
+    }
+
+    function showMsg(ok, text) {
+      const m = document.getElementById('modalMsg');
+      m.hidden = false; m.className = 'modal-msg ' + (ok ? 'ok' : 'err'); m.textContent = text;
+    }
+
+    function getFormData() {
+      const fd = new FormData(form);
+      return {
+        name: fd.get('name') || fd.get('host'),
+        host: fd.get('host'),
+        port: parseInt(fd.get('port')) || 22,
+        username: fd.get('username'),
+        password: currentAuth === 'password' ? fd.get('password') : undefined,
+        privateKey: currentAuth === 'key' ? fd.get('privateKey') : undefined,
+        passphrase: currentAuth === 'key' ? fd.get('passphrase') : undefined,
+      };
+    }
+
+    document.getElementById('testBtn')?.addEventListener('click', async () => {
+      if (!form.checkValidity()) return form.reportValidity();
+      const btn = document.getElementById('testBtn');
+      btn.disabled = true; btn.textContent = 'Testing…'; hideMsg();
+      try {
+        const res = await fetch('/api/test', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(getFormData())
+        });
+        const d = await res.json();
+        showMsg(d.ok, d.ok ? 'Connection successful!' : `Error: ${d.error}`);
+      } catch (e) {
+        showMsg(false, e.message);
+      } finally {
+        btn.disabled = false; btn.textContent = 'Test connection';
+      }
+    });
+
+    document.getElementById('addLocalBtn')?.addEventListener('click', async () => {
+      const btn = document.getElementById('addLocalBtn');
+      btn.disabled = true; btn.textContent = 'Adding…'; hideMsg();
+      try {
+        const res = await fetch('/api/servers', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ name: 'Local Machine', host: 'localhost', kind: 'local' })
+        });
+        if (res.ok) {
+          scrim.hidden = true;
+          form.reset();
+        } else {
+          const d = await res.json();
+          showMsg(false, d.error || 'Failed to add local machine');
+        }
+      } catch (e) {
+        showMsg(false, e.message);
+      } finally {
+        btn.disabled = false; btn.textContent = 'Monitor this laptop';
+      }
+    });
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const btn = document.getElementById('saveBtn');
+      btn.disabled = true; btn.textContent = 'Saving…'; hideMsg();
+      try {
+        const res = await fetch('/api/servers', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(getFormData())
+        });
+        if (res.ok) {
+          scrim.hidden = true;
+          form.reset();
+        } else {
+          const d = await res.json();
+          showMsg(false, d.error || 'Failed to save');
+        }
+      } catch (e) {
+        showMsg(false, e.message);
+      } finally {
+        btn.disabled = false; btn.textContent = 'Add & monitor';
+      }
+    });
+  }
+
+  // --- Topology (Three.js) ---
+  const Topo = (() => {
+    let scene, camera, renderer, nodes = [], links = [];
+    let raf, width, height, canvasEl, container;
+    
+    function init() {
+      container = document.getElementById('topoCanvas');
+      if (!container || typeof THREE === 'undefined') return;
+      canvasEl = document.createElement('canvas');
+      container.appendChild(canvasEl);
+      
+      const rect = container.getBoundingClientRect();
+      width = rect.width; height = rect.height || 300;
+      
+      scene = new THREE.Scene();
+      camera = new THREE.PerspectiveCamera(45, width/height, 0.1, 1000);
+      camera.position.z = 18;
+      
+      renderer = new THREE.WebGLRenderer({ canvas: canvasEl, alpha: true, antialias: true });
+      renderer.setSize(width, height);
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+
+      // Lights
+      const amb = new THREE.AmbientLight(0xffffff, 0.4);
+      scene.add(amb);
+      const dir1 = new THREE.DirectionalLight(0x35e5ff, 1);
+      dir1.position.set(5, 5, 5);
+      scene.add(dir1);
+      const dir2 = new THREE.DirectionalLight(0x8a7cff, 1.2);
+      dir2.position.set(-5, -5, -2);
+      scene.add(dir2);
+
+      // Starfield
+      const geom = new THREE.BufferGeometry();
+      const pos = [];
+      for(let i=0; i<300; i++) {
+        pos.push((Math.random()-0.5)*40, (Math.random()-0.5)*40, (Math.random()-0.5)*40);
+      }
+      geom.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+      const mat = new THREE.PointsMaterial({ color: 0x8791a5, size: 0.1, transparent: true, opacity: 0.5 });
+      const stars = new THREE.Points(geom, mat);
+      scene.add(stars);
+
+      let angle = 0;
+      let isDragging = false, prevX = 0, prevY = 0;
+      let targetRotX = 0, targetRotY = 0;
+
+      container.addEventListener('mousedown', (e) => { isDragging = true; prevX = e.clientX; prevY = e.clientY; });
+      window.addEventListener('mouseup', () => { isDragging = false; });
+      window.addEventListener('mousemove', (e) => {
+        if (!isDragging) return;
+        targetRotY += (e.clientX - prevX) * 0.01;
+        targetRotX += (e.clientY - prevY) * 0.01;
+        prevX = e.clientX; prevY = e.clientY;
+      });
+
+      function renderLoop() {
+        if (!document.getElementById('pageDashboard').hidden) {
+          if (!isDragging) targetRotY += 0.002; // auto rotate
+          scene.rotation.y += (targetRotY - scene.rotation.y) * 0.1;
+          scene.rotation.x += (targetRotX - scene.rotation.x) * 0.1;
+          renderer.render(scene, camera);
+        }
+        raf = requestAnimationFrame(renderLoop);
+      }
+      raf = requestAnimationFrame(renderLoop);
+    }
+    
+    function update() {
+      if (!scene) return;
+      const t = window._sreState.telemetry.get(window._sreState.selectedId);
+      if (!t || !t.ok) return;
+
+      // Clear old
+      nodes.forEach(n => scene.remove(n));
+      links.forEach(l => scene.remove(l));
+      nodes = []; links = [];
+
+      // Extract unique pods/services
+      const items = [];
+      const seen = new Set();
+      for (const w of t.workloads || []) {
+        let name = w.name;
+        // grouping hack
+        if (w.kind === 'pod') name = name.replace(/-[a-z0-9]{10}-[a-z0-9]{5}$/, '');
+        if (!seen.has(name)) { seen.add(name); items.push({ name, kind: w.kind }); }
+      }
+      
+      if (items.length === 0) {
+        items.push({ name: 'System', kind: 'host' });
+      }
+
+      // Central node (server)
+      const cGeo = new THREE.IcosahedronGeometry(1.2, 1);
+      const cMat = new THREE.MeshStandardMaterial({ 
+        color: t.status === 'healthy' ? 0x37e39b : t.status === 'warning' ? 0xffce5c : 0xff5c7c,
+        wireframe: true, transparent: true, opacity: 0.8
+      });
+      const cMesh = new THREE.Mesh(cGeo, cMat);
+      scene.add(cMesh);
+      nodes.push(cMesh);
+
+      // Orbit nodes
+      const count = items.length;
+      for (let i=0; i<count; i++) {
+        const phi = Math.acos(-1 + (2 * i) / count);
+        const theta = Math.sqrt(count * Math.PI) * phi;
+        const r = 5 + Math.random() * 2;
+        
+        const geo = new THREE.SphereGeometry(0.4, 16, 16);
+        const mat = new THREE.MeshStandardMaterial({ color: items[i].kind === 'pod' ? 0x8a7cff : 0x35e5ff });
+        const mesh = new THREE.Mesh(geo, mat);
+        
+        mesh.position.setFromSphericalCoords(r, phi, theta);
+        scene.add(mesh);
+        nodes.push(mesh);
+        
+        // Link to center
+        const lGeo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0,0,0), mesh.position]);
+        const lMat = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.1 });
+        const line = new THREE.Line(lGeo, lMat);
+        scene.add(line);
+        links.push(line);
+      }
+    }
+
+    return { init, update };
+  })();
+
+  // --- Dashboard Logic ---
+  const Dashboard = (() => {
+    function setGauge(id, val) {
+      const g = document.querySelector(`.gauge[data-metric="${id}"]`);
+      if (!g) return;
+      g.querySelector('span').textContent = Math.round(val);
+      const circle = g.querySelector('.g-fill');
+      const maxOffset = 326.7;
+      const color = val >= 90 ? 'var(--red)' : val >= 75 ? 'var(--amber)' : 'var(--cyan)';
+      circle.style.strokeDashoffset = maxOffset - (maxOffset * val) / 100;
+      circle.style.stroke = color;
+    }
+
+    function render() {
+      const id = window._sreState.selectedId;
+      const t = window._sreState.telemetry.get(id);
+      
+      if (!id || !t) {
+        document.getElementById('selName').textContent = '—';
+        document.getElementById('selHost').textContent = 'Select a server';
         return;
       }
-      showTip(id, e.clientX - rect.left, e.clientY - rect.top);
-      renderer.domElement.style.cursor = 'pointer';
-    } else if (!doSelect) {
-      hideTip();
-      renderer.domElement.style.cursor = drag.on ? 'grabbing' : 'grab';
+
+      document.getElementById('selName').textContent = t.name;
+      document.getElementById('selHost').textContent = `${t.host} (${t.kind})`;
+      document.getElementById('selMeta').textContent = `OS: ${t.os || 'unknown'} · Uptime: ${t.uptime || '—'}`;
+
+      if (!t.ok) {
+        document.getElementById('scoreNum').textContent = 'ERR';
+        document.getElementById('scoreNum').style.color = 'var(--red)';
+        setGauge('cpu', 0); setGauge('mem', 0); setGauge('disk', 0);
+        return;
+      }
+
+      const score = t.score || 0;
+      const scoreCol = score >= 70 ? 'var(--green)' : score >= 40 ? 'var(--amber)' : 'var(--red)';
+      const sEl = document.getElementById('scoreNum');
+      sEl.textContent = score;
+      sEl.style.color = scoreCol;
+
+      setGauge('cpu', t.cpuPct || 0);
+      setGauge('mem', t.memPct || 0);
+      setGauge('disk', t.diskPct || 0);
+
+      // Facts
+      const dl = document.getElementById('factList');
+      dl.innerHTML = `
+        <dt>Kernel</dt><dd>${esc(t.kernel || '—')}</dd>
+        <dt>CPU cores</dt><dd>${t.cores || '—'}</dd>
+        <dt>Memory</dt><dd>${t.memTotal || '—'}</dd>
+        <dt>Disk</dt><dd>${t.diskMount || '/'} (${t.diskTotal || '—'})</dd>
+      `;
+
+      if (t.load && t.load.length) {
+        document.getElementById('loadWrap').hidden = false;
+        document.getElementById('loadVals').textContent = t.load.join(', ');
+      }
+
+      // Procs
+      const pl = document.getElementById('procList');
+      if (t.procs && t.procs.length) {
+        pl.innerHTML = t.procs.slice(0, 8).map(p => {
+          let parts = p.cmd.split('/');
+          let name = parts[parts.length - 1] || p.cmd;
+          if (name.length > 25) name = name.substring(0, 22) + '...';
+          const max = 100;
+          const w = Math.min(100, Math.max(2, (p.cpu / max) * 100));
+          return `
+            <div class="proc">
+              <div class="proc-name">${esc(name)} <span>(PID ${p.pid})</span></div>
+              <div class="proc-val">${p.cpu}%</div>
+              <div class="proc-bar-wrap"><div class="proc-bar" style="width:${w}%"></div></div>
+            </div>
+          `;
+        }).join('');
+      } else {
+        pl.innerHTML = '<div class="empty">No process data</div>';
+      }
+
+      // Workloads
+      const wl = document.getElementById('workloads');
+      if (t.workloads && t.workloads.length) {
+        const pods = t.workloads.filter(w => w.kind === 'pod');
+        const cont = t.workloads.filter(w => w.kind === 'container');
+        
+        let h = '';
+        if (pods.length) {
+          h += `<div class="wl-group-cap">K8s Pods</div><div class="wl-chips">`;
+          h += pods.slice(0, 15).map(w => `<div class="wl-chip ${w.status==='Running'?'':'bad'}" title="${esc(w.name)}"><div class="d"></div><div class="img">${esc(w.name.split('-')[0])}</div></div>`).join('');
+          h += `</div>`;
+        }
+        if (cont.length) {
+          if (pods.length) h += `<div style="height:12px"></div>`;
+          h += `<div class="wl-group-cap">Docker</div><div class="wl-chips">`;
+          h += cont.slice(0, 15).map(w => `<div class="wl-chip ${w.status.includes('Up')?'':'bad'}" title="${esc(w.image)}"><div class="d"></div><div class="img">${esc(w.image.split(':')[0].split('/').pop())}</div></div>`).join('');
+          h += `</div>`;
+        }
+        wl.innerHTML = h;
+      } else {
+        wl.innerHTML = '<div class="empty">No Docker or K8s workloads found</div>';
+      }
+
+      Topo.update();
     }
-  }
 
-  function showTip(id, x, y) {
-    const s = state.servers.find((v) => v.id === id);
-    const t = state.telemetry.get(id);
-    if (!s) return;
-    hoverId = id;
-    el.topoTip.hidden = false;
-    el.topoTip.style.left = x + 'px';
-    el.topoTip.style.top = y + 'px';
-    const line2 = t && t.ok
-      ? `CPU <b>${fmtPct(t.cpuPct)}%</b> · MEM <b>${fmtPct(t.memPct)}%</b> · ${t.status}`
-      : (t && !t.ok ? 'offline' : 'waiting…');
-    el.topoTip.innerHTML = `<b>${esc(s.name)}</b><br/>${line2}`;
-  }
-  function hideTip() { if (hoverId) { el.topoTip.hidden = true; hoverId = null; } }
+    function appendLogs(lines) {
+      if (!lines || !lines.length) return;
+      const term = document.getElementById('terminal');
+      if (!term) return;
 
-  function onResize() {
-    if (!renderer) return;
-    const w = el.topoCanvas.clientWidth, h = el.topoCanvas.clientHeight;
-    if (!w || !h) return;
-    camera.aspect = w / h; camera.updateProjectionMatrix();
-    renderer.setSize(w, h);
-  }
+      const atBottom = term.scrollHeight - term.scrollTop - term.clientHeight < 20;
 
-  function animate() {
-    raf = requestAnimationFrame(animate);
-    if (!drag.on) rot.ty += 0.0016;           // gentle auto-orbit
-    rot.x += (rot.tx - rot.x) * 0.08;
-    rot.y += (rot.ty - rot.y) * 0.08;
-    pivot.rotation.x = rot.x;
-    pivot.rotation.y = rot.y;
-    if (hub) hub.rotation.y += 0.006;
-    const tm = performance.now() * 0.001;
-    for (const n of nodes.values()) {
-      if (n.base) n.mesh.position.y = n.base.y + Math.sin(tm + n.base.x) * 0.06;
+      for (const line of lines) {
+        let fmt = esc(line);
+        // Basic highlighting
+        fmt = fmt.replace(/\b(error|failed|fatal|critical)\b/gi, '<span class="tok-err">$&</span>');
+        fmt = fmt.replace(/\b(warn|warning)\b/gi, '<span class="tok-warn">$&</span>');
+        fmt = fmt.replace(/\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\b/g, '<span class="tok-ip">$&</span>');
+        fmt = fmt.replace(/\b([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})\b/gi, '<span class="tok-num">$&</span>');
+
+        const el = document.createElement('div');
+        el.className = 'log-line';
+        el.innerHTML = fmt;
+        
+        el.addEventListener('click', async () => {
+          navigator.clipboard.writeText(line).catch(()=>{});
+          el.classList.add('copied');
+          setTimeout(() => el.classList.remove('copied'), 500);
+          triggerAI(line);
+        });
+        
+        term.appendChild(el);
+      }
+
+      while (term.children.length > 200) term.removeChild(term.firstChild);
+      if (atBottom) term.scrollTop = term.scrollHeight;
     }
-    renderer.render(scene, camera);
+
+    async function triggerAI(specificLog = null, errorContext = null) {
+      const btn = document.getElementById('analyzeBtn');
+      const body = document.getElementById('aiBody');
+      const incBtn = document.getElementById('createIncidentBtn');
+      const id = window._sreState.selectedId;
+      
+      if (!id) return;
+      btn.disabled = true;
+      btn.innerHTML = '<div class="spinner"></div> Analyzing...';
+      if (incBtn) incBtn.hidden = true;
+
+      try {
+        const res = await fetch('/api/analyze', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ serverId: id, log: specificLog, errorContext })
+        });
+        const ans = await res.json();
+        
+        const riskClass = 'risk-' + (ans.risk || 'safe');
+        
+        body.innerHTML = `
+          <div class="ai-sev"><div class="d" style="background:var(--${ans.severity === 'critical' ? 'red' : ans.severity === 'warning' ? 'amber' : 'cyan'})"></div>${ans.severity}</div>
+          <div class="ai-summary">${esc(ans.summary)}</div>
+          <div class="ai-rca">${esc(ans.rootCause)}</div>
+          ${ans.command ? `
+            <div class="ai-cmd-cap">Suggested Action</div>
+            <div class="ai-cmd">
+              ${esc(ans.command)}
+              <button class="ai-copy" onclick="navigator.clipboard.writeText('${esc(ans.command)}')">copy</button>
+            </div>
+            <div class="ai-foot" style="display:flex;justify-content:space-between;align-items:center;margin-top:12px;">
+              <div>
+                <span class="ai-risk ${riskClass}">Risk: ${ans.risk}</span>
+                ${ans.confidence ? `<span>Confidence: ${Math.round(ans.confidence * 100)}%</span>` : ''}
+              </div>
+              <button class="btn primary small" id="executeFixBtn">🪄 Auto-Fix</button>
+            </div>
+          ` : ''}
+        `;
+
+        if (ans.command) {
+          const executeFixBtn = document.getElementById('executeFixBtn');
+          if (executeFixBtn) {
+            executeFixBtn.addEventListener('click', async () => {
+              const srvName = window._sreState.telemetry.get(id)?.name || id;
+              if (!confirm(`Can I run this command on ${srvName}?\n\nCommand: ${ans.command}`)) return;
+              
+              executeFixBtn.disabled = true;
+              executeFixBtn.textContent = '⏳ Running...';
+              
+              try {
+                const fixRes = await fetch('/api/execute-fix', {
+                  method: 'POST', headers: { 'content-type': 'application/json' },
+                  body: JSON.stringify({ serverId: id, command: ans.command })
+                });
+                const execInfo = await fixRes.json();
+                
+                // Wait for execution to finish via polling (or WebSocket, but polling is simpler here)
+                let finalStatus = null;
+                let finalError = null;
+                for (let i = 0; i < 30; i++) {
+                  await new Promise(r => setTimeout(r, 1000));
+                  const pollRes = await fetch(`/api/automation/history/${execInfo.id}`);
+                  const pollData = await pollRes.json();
+                  if (pollData.status !== 'running') {
+                    finalStatus = pollData.status;
+                    finalError = pollData.steps?.[0]?.error;
+                    break;
+                  }
+                }
+                
+                if (finalStatus === 'failed') {
+                  executeFixBtn.className = 'btn small';
+                  executeFixBtn.style.background = 'var(--red)';
+                  executeFixBtn.textContent = '❌ Failed';
+                  
+                  // Trigger AI loop with error context
+                  setTimeout(() => {
+                    body.innerHTML = '<div style="color:var(--amber)">Command failed. Re-analyzing with error context...</div>';
+                    triggerAI(specificLog, finalError || 'Command returned non-zero exit code.');
+                  }, 1500);
+                  
+                } else if (finalStatus === 'completed') {
+                  executeFixBtn.className = 'btn small';
+                  executeFixBtn.style.background = 'var(--green)';
+                  executeFixBtn.textContent = '✅ Fixed';
+                } else {
+                  executeFixBtn.textContent = 'Timeout';
+                }
+              } catch (e) {
+                alert('Execution error: ' + e.message);
+                executeFixBtn.disabled = false;
+                executeFixBtn.textContent = '🪄 Auto-Fix';
+              }
+            });
+          }
+        }
+
+        if (incBtn && window.Incidents) {
+          incBtn.hidden = false;
+          incBtn.onclick = async () => {
+            const t = window._sreState.telemetry.get(id);
+            const name = t ? t.name : '';
+            const ok = await window.Incidents.createFromAnalysis(ans, id, name);
+            if (ok) {
+              incBtn.textContent = '✓ Created';
+              incBtn.disabled = true;
+            }
+          };
+        }
+
+      } catch (e) {
+        body.innerHTML = `<div class="tok-err">Analysis failed: ${e.message}</div>`;
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Analyze recent logs';
+      }
+    }
+
+    return { render, appendLogs, triggerAI, init: Topo.init };
+  })();
+
+  function renderDashboard() {
+    Dashboard.render();
   }
 
-  return { init, sync, recolor };
+  async function boot() {
+    // 1. Initial config fetch
+    try {
+      const c = await fetch('/api/config').then(r => r.json());
+      document.getElementById('aiProvider').textContent = c.aiProvider || '—';
+      document.getElementById('refreshRate').textContent = `${c.refreshMs}ms`;
+    } catch {}
+
+    // 2. Initialize pages & router
+    initAddServer();
+    Dashboard.init();
+    
+    document.getElementById('analyzeBtn')?.addEventListener('click', () => Dashboard.triggerAI());
+
+    Router.register('/dashboard', {
+      el: document.getElementById('pageDashboard'),
+      onEnter: () => renderDashboard()
+    });
+
+    Router.register('/godmode', {
+      el: document.getElementById('pageGodmode'),
+      onEnter: () => window.GodMode && window.GodMode.render()
+    });
+
+    Router.register('/incidents', {
+      el: document.getElementById('pageIncidents'),
+      onEnter: () => window.Incidents && window.Incidents.load()
+    });
+
+    Router.register('/automation', {
+      el: document.getElementById('pageAutomation'),
+      onEnter: () => window.Automation && window.Automation.load()
+    });
+
+    Router.register('/runbooks', {
+      el: document.getElementById('pageRunbooks'),
+      onEnter: () => window.Runbooks && window.Runbooks.load()
+    });
+
+    Router.register('/settings', {
+      el: document.getElementById('pageSettings'),
+      onEnter: () => window.Settings && window.Settings.load()
+    });
+
+    // 3. Initialize module internals
+    if (window.Incidents) window.Incidents.initModal();
+    if (window.Runbooks) window.Runbooks.init();
+
+    // 4. Start routing
+    Router.init();
+    Router.start();
+
+    // 5. Connect WebSocket
+    connectWs();
+  }
+
+  return { boot };
 })();
 
-/* ── Boot ───────────────────────────────────────────────────────────── */
-async function boot() {
-  try {
-    const cfg = await (await fetch('/api/config')).json();
-    state.config = cfg;
-    el.aiProvider.textContent = cfg.aiProvider;
-    el.refreshRate.textContent = (cfg.refreshMs / 1000) + 's';
-  } catch { /* defaults stand */ }
-  Topo.init();
-  connect();
-}
-boot();
+document.addEventListener('DOMContentLoaded', () => App.boot());
