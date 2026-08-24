@@ -14,6 +14,7 @@ import * as runbookStore from './lib/runbookStore.js';
 import * as automationEngine from './lib/automationEngine.js';
 import * as settingsStore from './lib/settingsStore.js';
 import * as alertEngine from './lib/alertEngine.js';
+import { authMiddleware } from './lib/supabase.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -68,16 +69,21 @@ app.use(express.json({ limit: '256kb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ── Config ────────────────────────────────────────────────────────────
-app.get('/api/config', (_req, res) => res.json({ aiProvider: aiProvider(), refreshMs: REFRESH_MS }));
+app.get('/api/config', (_req, res) => res.json({ 
+  aiProvider: aiProvider(), 
+  refreshMs: REFRESH_MS,
+  supabaseUrl: process.env.SUPABASE_URL || '',
+  supabaseAnonKey: process.env.SUPABASE_ANON_KEY || ''
+}));
 
 // ── Server CRUD ───────────────────────────────────────────────────────
-app.get('/api/servers', (_req, res) => res.json(store.list()));
+app.get('/api/servers', authMiddleware, async (req, res) => res.json(await store.list(req.user.id)));
 
-app.post('/api/servers', async (req, res) => {
+app.post('/api/servers', authMiddleware, async (req, res) => {
   try {
-    const server = await store.add(req.body || {});
-    broadcast({ type: 'inventory', servers: store.list() });
-    const full = store.get(server.id);
+    const server = await store.add(req.user.id, req.body || {});
+    broadcast({ type: 'inventory', servers: await store.list(req.user.id) });
+    const full = await store.get(req.user.id, server.id);
     pollServer(full); // start streaming immediately
     res.json(server);
   } catch (e) {
@@ -85,17 +91,17 @@ app.post('/api/servers', async (req, res) => {
   }
 });
 
-app.delete('/api/servers/:id', async (req, res) => {
-  const ok = await store.remove(req.params.id);
+app.delete('/api/servers/:id', authMiddleware, async (req, res) => {
+  const ok = await store.remove(req.user.id, req.params.id);
   if (!ok) return res.status(400).json({ error: 'Cannot remove this server.' });
   lastTelemetry.delete(req.params.id);
   seenLogs.delete(req.params.id);
-  broadcast({ type: 'inventory', servers: store.list() });
+  broadcast({ type: 'inventory', servers: await store.list(req.user.id) });
   res.json({ ok: true });
 });
 
-app.post('/api/servers/:id/test', async (req, res) => {
-  const server = store.get(req.params.id);
+app.post('/api/servers/:id/test', authMiddleware, async (req, res) => {
+  const server = await store.get(req.user.id, req.params.id);
   if (!server) return res.status(404).json({ error: 'Not found.' });
   if (server.kind === 'local') return res.json({ ok: true, message: 'Local machine — always reachable.' });
   try {
@@ -104,6 +110,21 @@ app.post('/api/servers/:id/test', async (req, res) => {
   } catch (e) {
     res.status(400).json({ ok: false, error: e.message });
   }
+});
+
+app.get('/api/telemetry', authMiddleware, async (req, res) => {
+  // In Vercel serverless, we do an on-demand poll for the user's servers
+  const servers = await store.list(req.user.id);
+  // Fire off polling in parallel
+  await Promise.all(servers.map((s) => pollServer(s)));
+  
+  // Return the latest telemetry for this user's servers
+  const results = [];
+  for (const s of servers) {
+    const t = lastTelemetry.get(s.id);
+    if (t) results.push({ ...t, logs: undefined });
+  }
+  res.json({ servers, telemetry: results });
 });
 
 // Dry-run: validate credentials WITHOUT saving.
@@ -347,8 +368,8 @@ function broadcast(msg) {
   for (const c of wss.clients) if (c.readyState === 1) c.send(s);
 }
 
-wss.on('connection', (ws) => {
-  ws.send(JSON.stringify({ type: 'inventory', servers: store.list() }));
+wss.on('connection', async (ws) => {
+  ws.send(JSON.stringify({ type: 'inventory', servers: await store.list() }));
   for (const t of lastTelemetry.values()) {
     ws.send(JSON.stringify({ type: 'telemetry', data: { ...t, logs: undefined } }));
   }
@@ -470,7 +491,8 @@ async function pollServer(server) {
 }
 
 async function pollAll() {
-  await Promise.all(store.all().map((s) => pollServer(s)));
+  const servers = await store.all(); // This uses 'local-dev-user' by default for polling all servers
+  await Promise.all(servers.map((s) => pollServer(s)));
 }
 
 // ── Boot ──────────────────────────────────────────────────────────────
@@ -480,10 +502,17 @@ await incidentStore.load();
 await runbookStore.load();
 await automationEngine.load();
 
-server.listen(PORT, () => {
-  console.log(`\n  SREAI running →  http://localhost:${PORT}`);
-  console.log(`  AI analysis   →  ${aiProvider()}`);
-  console.log(`  Refresh       →  every ${REFRESH_MS} ms\n`);
-  pollAll();
-  setInterval(pollAll, REFRESH_MS);
-});
+if (process.env.VERCEL) {
+  console.log('Running in Vercel Serverless Mode');
+  // In serverless, we don't start the WebSocket server or the continuous polling loop
+} else {
+  server.listen(PORT, () => {
+    console.log(`\n  SREAI running →  http://localhost:${PORT}`);
+    console.log(`  AI analysis   →  ${aiProvider()}`);
+    console.log(`  Refresh       →  every ${REFRESH_MS} ms\n`);
+    pollAll();
+    setInterval(pollAll, REFRESH_MS);
+  });
+}
+
+export default app;

@@ -14,15 +14,42 @@ window._sreState = {
 const App = (() => {
   let ws;
 
-  function esc(s) {
-    return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  (async function () {
+  const esc = (s) => String(s || '').replace(/[&<>"']/g, (m) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[m]);
+
+  // --- Auth Guard ---
+  let token = null;
+  let user = null;
+  try {
+    const res = await fetch('/api/config');
+    const config = await res.json();
+    if (config.supabaseUrl && config.supabaseAnonKey) {
+      const supabase = window.supabase.createClient(config.supabaseUrl, config.supabaseAnonKey);
+      const { data } = await supabase.auth.getSession();
+      if (!data.session) {
+        window.location.href = '/login.html';
+        return; // Stop execution
+      }
+      token = data.session.access_token;
+      user = data.session.user;
+    }
+  } catch (e) {
+    console.warn('Auth check failed or not configured, continuing locally.', e);
   }
+
+  // Helper to add auth headers
+  const fetchApi = async (url, options = {}) => {
+    if (!options.headers) options.headers = {};
+    if (token) options.headers['Authorization'] = `Bearer ${token}`;
+    return fetch(url, options);
+  };
 
   // --- WebSocket ---
   function connectWs() {
     const loc = window.location;
     const proto = loc.protocol === 'https:' ? 'wss:' : 'ws:';
-    ws = new WebSocket(`${proto}//${loc.host}/`);
+    const wsUrl = `${proto}//${loc.host}/?token=${token || ''}`;
+    ws = new WebSocket(wsUrl);
 
     ws.onopen = () => {
       document.getElementById('liveState').dataset.live = 'on';
@@ -31,6 +58,28 @@ const App = (() => {
 
     ws.onclose = () => {
       document.getElementById('liveState').dataset.live = 'off';
+      document.getElementById('liveState').textContent = 'Live (HTTP Polling)';
+      
+      // Fallback for Vercel / Serverless where WebSockets aren't supported
+      if (!window.pollingInterval) {
+        window.pollingInterval = setInterval(async () => {
+          try {
+            const res = await fetchApi('/api/telemetry');
+            if (!res.ok) return;
+            const data = await res.json();
+            
+            // Simulate WebSocket messages for inventory and telemetry
+            if (data.servers) {
+              handleMessage({ type: 'inventory', servers: data.servers });
+            }
+            if (data.telemetry) {
+              data.telemetry.forEach(t => handleMessage({ type: 'telemetry', data: t }));
+            }
+          } catch (e) {
+            console.warn('HTTP Polling error:', e);
+          }
+        }, 3000);
+      }
       document.getElementById('liveLabel').textContent = 'reconnecting…';
       setTimeout(connectWs, 3000);
     };
@@ -111,7 +160,7 @@ const App = (() => {
         e.stopPropagation();
         if (!confirm('Remove this server?')) return;
         const id = btn.dataset.del;
-        await fetch(`/api/servers/${id}`, { method: 'DELETE' });
+        await fetchApi('/api/servers/' + id, { method: 'DELETE' });
         if (window._sreState.selectedId === id) window._sreState.selectedId = null;
       });
     });
@@ -193,11 +242,11 @@ const App = (() => {
       const btn = document.getElementById('testBtn');
       btn.disabled = true; btn.textContent = 'Testing…'; hideMsg();
       try {
-        const res = await fetch('/api/test', {
+        const testRes = await fetchApi('/api/test', {
           method: 'POST', headers: { 'content-type': 'application/json' },
           body: JSON.stringify(getFormData())
         });
-        const d = await res.json();
+        const d = await testRes.json();
         showMsg(d.ok, d.ok ? 'Connection successful!' : `Error: ${d.error}`);
       } catch (e) {
         showMsg(false, e.message);
@@ -210,7 +259,7 @@ const App = (() => {
       const btn = document.getElementById('addLocalBtn');
       btn.disabled = true; btn.textContent = 'Adding…'; hideMsg();
       try {
-        const res = await fetch('/api/servers', {
+        const res = await fetchApi('/api/servers', {
           method: 'POST', headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ name: 'Local Machine', host: 'localhost', kind: 'local' })
         });
@@ -233,7 +282,7 @@ const App = (() => {
       const btn = document.getElementById('saveBtn');
       btn.disabled = true; btn.textContent = 'Saving…'; hideMsg();
       try {
-        const res = await fetch('/api/servers', {
+        const res = await fetchApi('/api/servers', {
           method: 'POST', headers: { 'content-type': 'application/json' },
           body: JSON.stringify(getFormData())
         });
@@ -531,7 +580,7 @@ const App = (() => {
       if (incBtn) incBtn.hidden = true;
 
       try {
-        const res = await fetch('/api/analyze', {
+        const res = await fetchApi('/api/analyze', {
           method: 'POST', headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ serverId: id, log: specificLog, errorContext })
         });
@@ -570,7 +619,7 @@ const App = (() => {
               executeFixBtn.textContent = '⏳ Running...';
               
               try {
-                const fixRes = await fetch('/api/execute-fix', {
+                const fixRes = await fetchApi('/api/execute-fix', {
                   method: 'POST', headers: { 'content-type': 'application/json' },
                   body: JSON.stringify({ serverId: id, command: ans.command })
                 });
@@ -581,7 +630,7 @@ const App = (() => {
                 let finalError = null;
                 for (let i = 0; i < 30; i++) {
                   await new Promise(r => setTimeout(r, 1000));
-                  const pollRes = await fetch(`/api/automation/history/${execInfo.id}`);
+                  const pollRes = await fetchApi(`/api/automation/history/${execInfo.id}`);
                   const pollData = await pollRes.json();
                   if (pollData.status !== 'running') {
                     finalStatus = pollData.status;

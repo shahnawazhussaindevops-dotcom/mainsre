@@ -12,6 +12,7 @@
     "dev": "node --watch server.js"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.112.4",
     "express": "^4.19.2",
     "ssh2": "^1.15.0",
     "ws": "^8.18.0"
