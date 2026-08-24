@@ -11,10 +11,9 @@ window._sreState = {
   selectedId: null,
 };
 
-const App = (() => {
+const App = (async () => {
   let ws;
 
-  (async function () {
   const esc = (s) => String(s || '').replace(/[&<>"']/g, (m) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[m]);
 
   // --- Auth Guard ---
@@ -753,4 +752,7 @@ const App = (() => {
   return { boot };
 })();
 
-document.addEventListener('DOMContentLoaded', () => App.boot());
+document.addEventListener('DOMContentLoaded', async () => {
+  const app = await App;
+  app.boot();
+});
