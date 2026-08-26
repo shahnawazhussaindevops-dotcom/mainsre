@@ -74,6 +74,9 @@ const App = (async () => {
             if (data.telemetry) {
               data.telemetry.forEach(t => handleMessage({ type: 'telemetry', data: t }));
             }
+            if (data.logs) {
+              data.logs.forEach(msg => handleMessage(msg));
+            }
           } catch (e) {
             console.warn('HTTP Polling error:', e);
           }

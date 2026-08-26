@@ -116,15 +116,26 @@ app.get('/api/telemetry', authMiddleware, async (req, res) => {
   // In Vercel serverless, we do an on-demand poll for the user's servers
   const servers = await store.list(req.user.id);
   // Fire off polling in parallel
-  await Promise.all(servers.map((s) => pollServer(s)));
+  const pollResults = await Promise.all(servers.map((s) => pollServer(s)));
   
   // Return the latest telemetry for this user's servers
   const results = [];
-  for (const s of servers) {
-    const t = lastTelemetry.get(s.id);
-    if (t) results.push({ ...t, logs: undefined });
+  const logMessages = [];
+  
+  for (let i = 0; i < servers.length; i++) {
+    const s = servers[i];
+    const pr = pollResults[i];
+    
+    // Try to get from poll result, fallback to lastTelemetry
+    const t = pr ? pr.telemetry : lastTelemetry.get(s.id);
+    if (t) {
+      results.push({ ...t, logs: undefined });
+    }
+    if (pr && pr.logs && pr.logs.length) {
+      logMessages.push({ type: 'log', serverId: s.id, name: s.name, status: t?.status, lines: pr.logs });
+    }
   }
-  res.json({ servers, telemetry: results });
+  res.json({ servers, telemetry: results, logs: logMessages });
 });
 
 // Dry-run: validate credentials WITHOUT saving.
@@ -431,7 +442,7 @@ function hashLine(l) {
 }
 
 async function pollServer(server) {
-  if (!server || busy.has(server.id)) return;
+  if (!server || busy.has(server.id)) return null;
   busy.add(server.id);
   try {
     const raw = server.kind === 'local' ? await local.collect() : await ssh.collect(server);
@@ -471,6 +482,7 @@ async function pollServer(server) {
     // ── Alert detection (auto-create incidents) ──
     await alertEngine.processAlerts(enriched, broadcast).catch(() => {});
 
+    return { telemetry: enriched, logs: toSend };
   } catch (e) {
     const errT = {
       id: server.id,
@@ -485,6 +497,7 @@ async function pollServer(server) {
     };
     lastTelemetry.set(server.id, errT);
     broadcast({ type: 'telemetry', data: errT });
+    return { telemetry: errT, logs: [] };
   } finally {
     busy.delete(server.id);
   }
