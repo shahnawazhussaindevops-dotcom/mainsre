@@ -40,7 +40,18 @@ const App = (async () => {
       }
 
       const { data } = await supabase.auth.getSession();
+      
+      // If there's an error in the URL from Supabase, log it to the user
+      if (window.location.search.includes('error=')) {
+        const urlParams = new URLSearchParams(window.location.search);
+        const errDesc = urlParams.get('error_description');
+        alert('Authentication Error: ' + errDesc);
+      }
+
       if (!data.session) {
+        if (window.location.search.includes('code=')) {
+          alert("Login failed! The secure token exchange failed. Please make sure you are using exactly https://sreai.shahnawazhussaindevops.in and not 'www.'");
+        }
         window.location.href = '/login.html';
         return; // Stop execution
       }
