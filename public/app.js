@@ -25,8 +25,8 @@ const App = (async () => {
     if (config.supabaseUrl && config.supabaseAnonKey) {
       const supabase = window.supabase.createClient(config.supabaseUrl, config.supabaseAnonKey);
       
-      // If returning from an OAuth redirect, wait for Supabase to parse the token
-      if (window.location.hash.includes('access_token')) {
+      // If returning from an OAuth redirect (PKCE code in query or implicit token in hash)
+      if (window.location.hash.includes('access_token') || window.location.search.includes('code=')) {
         await new Promise((resolve) => {
           const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
             if (session) {
@@ -34,7 +34,7 @@ const App = (async () => {
               resolve();
             }
           });
-          // Timeout after 3 seconds just in case
+          // Timeout after 3 seconds to avoid indefinite hang
           setTimeout(() => { subscription.unsubscribe(); resolve(); }, 3000);
         });
       }
@@ -46,6 +46,11 @@ const App = (async () => {
       }
       token = data.session.access_token;
       user = data.session.user;
+      
+      // Clear the sensitive code/token from the URL bar for cleanliness and security
+      if (window.location.search.includes('code=') || window.location.hash.includes('access_token')) {
+        window.history.replaceState({}, document.title, window.location.pathname);
+      }
     }
   } catch (e) {
     console.warn('Auth check failed or not configured, continuing locally.', e);
