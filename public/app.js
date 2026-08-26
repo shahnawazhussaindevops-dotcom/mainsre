@@ -24,6 +24,21 @@ const App = (async () => {
     const config = await res.json();
     if (config.supabaseUrl && config.supabaseAnonKey) {
       const supabase = window.supabase.createClient(config.supabaseUrl, config.supabaseAnonKey);
+      
+      // If returning from an OAuth redirect, wait for Supabase to parse the token
+      if (window.location.hash.includes('access_token')) {
+        await new Promise((resolve) => {
+          const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+            if (session) {
+              subscription.unsubscribe();
+              resolve();
+            }
+          });
+          // Timeout after 3 seconds just in case
+          setTimeout(() => { subscription.unsubscribe(); resolve(); }, 3000);
+        });
+      }
+
       const { data } = await supabase.auth.getSession();
       if (!data.session) {
         window.location.href = '/login.html';
